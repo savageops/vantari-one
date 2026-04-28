@@ -2,6 +2,7 @@
 zig-out/
 .playwright-cli/
 .var/sessions/
+.var/auth/
 .docs/todo/pending/
 .docs/todo/changelog/
 tmp-*.txt

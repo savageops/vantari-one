@@ -1,26 +1,40 @@
 const std = @import("std");
 
-// TODO: Keep root exports narrow and readable so the harness stays easy to audit.
-pub const types = @import("types.zig");
-pub const fsutil = @import("fsutil.zig");
-pub const config = @import("config.zig");
-pub const store = @import("store.zig");
+pub const shared = @import("shared/index.zig");
+pub const core = @import("core/index.zig");
+pub const host = @import("host/index.zig");
+pub const clients = @import("clients/index.zig");
+
+// Layered namespaces are canonical. Flat aliases remain as the one-wave
+// compatibility surface while callers converge on shared/core/host/clients.
+pub const types = shared.types;
+pub const fsutil = shared.fsutil;
+pub const config = shared.config;
+pub const store = core.session_store;
+pub const auth_store = core.auth_store;
+pub const auth_resolver = core.auth_resolver;
+pub const context = core.context;
 pub const docs_sync = @import("docs_sync.zig");
-pub const provider = @import("provider.zig");
-pub const harness_tools = @import("harness_tools.zig");
-pub const tools = @import("tools.zig");
-pub const loop = @import("loop.zig");
-pub const agents = @import("agents.zig");
-pub const protocol_types = @import("protocol_types.zig");
-pub const stdio_rpc = @import("stdio_rpc.zig");
-pub const web = @import("web.zig");
-pub const cli = @import("cli.zig");
+pub const provider = core.provider_runtime;
+pub const harness_tools = core.harness_runtime;
+pub const tools = core.tool_runtime;
+pub const loop = core.executor;
+pub const agents = core.agent_runtime;
+pub const protocol_types = core.protocol_types;
+pub const stdio_rpc = host.stdio_rpc;
+pub const web = host.http_bridge;
+pub const cli = clients.cli;
 
 test "root exports scaffold" {
-    try std.testing.expect(@hasDecl(@This(), "config"));
-    try std.testing.expect(@hasDecl(@This(), "loop"));
+    try std.testing.expect(@hasDecl(@This(), "shared"));
+    try std.testing.expect(@hasDecl(@This(), "core"));
+    try std.testing.expect(@hasDecl(@This(), "host"));
+    try std.testing.expect(@hasDecl(@This(), "clients"));
+    _ = core.executor;
+    _ = host.stdio_rpc;
+    _ = clients.cli;
 }
 
 test {
-    _ = @import("provider.zig");
+    _ = core.provider_runtime;
 }

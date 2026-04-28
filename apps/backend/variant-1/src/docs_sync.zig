@@ -27,24 +27,24 @@ pub fn ensureRunStart(allocator: std.mem.Allocator, workspace_root: []const u8) 
 pub fn writePending(allocator: std.mem.Allocator, workspace_root: []const u8, snapshot: types.ProgressSnapshot) !void {
     try ensureRunStart(allocator, workspace_root);
 
-    const pending_path = try todoSlicePath(allocator, workspace_root, snapshot.task_id);
+    const pending_path = try todoSlicePath(allocator, workspace_root, snapshot.session_id);
     defer allocator.free(pending_path);
 
-    const content = try renderTaskDoc(allocator, snapshot);
+    const content = try renderSessionDoc(allocator, snapshot);
     defer allocator.free(content);
     try fsutil.writeText(pending_path, content);
 }
 
-pub fn completeTask(allocator: std.mem.Allocator, workspace_root: []const u8, snapshot: types.ProgressSnapshot) !void {
+pub fn completeSession(allocator: std.mem.Allocator, workspace_root: []const u8, snapshot: types.ProgressSnapshot) !void {
     try ensureRunStart(allocator, workspace_root);
 
-    const pending_path = try todoSlicePath(allocator, workspace_root, snapshot.task_id);
+    const pending_path = try todoSlicePath(allocator, workspace_root, snapshot.session_id);
     defer allocator.free(pending_path);
 
-    const changelog_path = try changelogSlicePath(allocator, workspace_root, snapshot.task_id);
+    const changelog_path = try changelogSlicePath(allocator, workspace_root, snapshot.session_id);
     defer allocator.free(changelog_path);
 
-    const content = try renderTaskDoc(allocator, snapshot);
+    const content = try renderSessionDoc(allocator, snapshot);
     defer allocator.free(content);
 
     try fsutil.writeText(pending_path, content);
@@ -73,22 +73,22 @@ pub fn memoriesFilePath(allocator: std.mem.Allocator, workspace_root: []const u8
     return fsutil.join(allocator, &.{ workspace_root, ".var", "memories", "memories.md" });
 }
 
-pub fn todoSlicePath(allocator: std.mem.Allocator, workspace_root: []const u8, task_id: []const u8) ![]u8 {
-    return fsutil.join(allocator, &.{ workspace_root, ".var", "todos", "task", task_id, "todo-slice1.md" });
+pub fn todoSlicePath(allocator: std.mem.Allocator, workspace_root: []const u8, session_id: []const u8) ![]u8 {
+    return fsutil.join(allocator, &.{ workspace_root, ".var", "todos", "session", session_id, "todo-slice1.md" });
 }
 
-pub fn changelogSlicePath(allocator: std.mem.Allocator, workspace_root: []const u8, task_id: []const u8) ![]u8 {
-    return fsutil.join(allocator, &.{ workspace_root, ".var", "changelog", task_id, "todo-slice1.md" });
+pub fn changelogSlicePath(allocator: std.mem.Allocator, workspace_root: []const u8, session_id: []const u8) ![]u8 {
+    return fsutil.join(allocator, &.{ workspace_root, ".var", "changelog", session_id, "todo-slice1.md" });
 }
 
-fn renderTaskDoc(allocator: std.mem.Allocator, snapshot: types.ProgressSnapshot) ![]u8 {
-    const result = if (snapshot.answer.len == 0) "Pending" else snapshot.answer;
-    const blockers = if (std.mem.eql(u8, snapshot.status, "failed")) snapshot.answer else "None";
+fn renderSessionDoc(allocator: std.mem.Allocator, snapshot: types.ProgressSnapshot) ![]u8 {
+    const result = if (snapshot.output.len == 0) "Pending" else snapshot.output;
+    const blockers = if (std.mem.eql(u8, snapshot.status, "failed")) snapshot.output else "None";
     return std.fmt.allocPrint(
         allocator,
         \\# Todo Slice 1
         \\
-        \\- Task ID: {s}
+        \\- Session ID: {s}
         \\- Status: {s}
         \\- Updated At (ms): {d}
         \\- Canonical Session Root: `.var/sessions/{s}/`
@@ -104,23 +104,27 @@ fn renderTaskDoc(allocator: std.mem.Allocator, snapshot: types.ProgressSnapshot)
         \\## Steps Taken
         \\
         \\- Canonical session state is stored under `.var/sessions/{s}/`.
-        \\- Journal events append to `journal.jsonl`.
+        \\- Session events append to `events.jsonl`.
         \\- This file is the human-readable execution slice for the current run.
         \\
         \\## Blockers
         \\
         \\{s}
         \\
-    ,
+        ,
         .{
-            snapshot.task_id,
+            snapshot.session_id,
             snapshot.status,
             snapshot.updated_at_ms,
-            snapshot.task_id,
+            snapshot.session_id,
             snapshot.prompt,
             result,
-            snapshot.task_id,
+            snapshot.session_id,
             blockers,
         },
     );
+}
+
+pub fn completeTask(allocator: std.mem.Allocator, workspace_root: []const u8, snapshot: types.ProgressSnapshot) !void {
+    return completeSession(allocator, workspace_root, snapshot);
 }

@@ -347,7 +347,7 @@ fn writeTemplateFile(path: []const u8, content: []const u8, force_overwrite: boo
 }
 
 fn defaultHarnessReadme() []const u8 {
-    return
+    const content =
         \\# .var
         \\
         \\`.var/` is the canonical runtime-owned and process-owned root for this workspace.
@@ -358,27 +358,30 @@ fn defaultHarnessReadme() []const u8 {
         \\- `.docs/` remains readable repo documentation or preserved historical material when present.
         \\- `init_harness` owns the default scaffold. Other harness tools operate inside that canonical tree and do not create a parallel system.
     ;
+    return content;
 }
 
 fn defaultMemoriesFile() []const u8 {
-    return
+    const content =
         \\# Project Memories
         \\
         \\## Durable Context
         \\
         \\- Record stable learnings here after reading `.var/changelog/_log.md`.
     ;
+    return content;
 }
 
 fn defaultChangelogFile() []const u8 {
-    return
+    const content =
         \\# Harness Changelog Log
         \\
     ;
+    return content;
 }
 
 fn defaultDocsIndex() []const u8 {
-    return
+    const content =
         \\# .var Docs Index
         \\
         \\- [architecture.md](./architecture.md)
@@ -390,10 +393,11 @@ fn defaultDocsIndex() []const u8 {
         \\
         \\Use `.var/` for live harness/process state. Use `.docs/` for readable repo documentation and preserved legacy artifacts.
     ;
+    return content;
 }
 
 fn defaultDocsArchitecture() []const u8 {
-    return
+    const content =
         \\# .var Architecture
         \\
         \\## Runtime Boundary
@@ -418,6 +422,8 @@ fn defaultDocsArchitecture() []const u8 {
         \\    sessions/
         \\      <task-name>/
         \\        session.md
+        \\    auth/
+        \\      auth.json
         \\    research/
         \\    docs/
         \\      _index.md
@@ -433,10 +439,11 @@ fn defaultDocsArchitecture() []const u8 {
         \\- Harness-domain tools operate inside `.var/` only.
         \\- Consumer runtimes such as `VAR1` must project through the root contract instead of inventing a parallel system.
     ;
+    return content;
 }
 
 fn defaultToolContracts() []const u8 {
-    return
+    const content =
         \\# Tool Contracts
         \\
         \\## Init Tool
@@ -462,30 +469,34 @@ fn defaultToolContracts() []const u8 {
         \\- tools may be used only when relevant to the task
         \\- no tool may create a parallel state system
     ;
+    return content;
 }
 
 fn defaultWorktreesReadme() []const u8 {
-    return
+    const content =
         \\# .var Worktrees
         \\
         \\Use `harness_worktree` to manage Git worktrees under this directory when the workspace is a real Git checkout.
     ;
+    return content;
 }
 
 fn defaultBackupReadme() []const u8 {
-    return
+    const content =
         \\# .var Backup
         \\
         \\Use `harness_backup` to create timestamped workspace archives before destructive operations or large migrations.
     ;
+    return content;
 }
 
 fn defaultResearchReadme() []const u8 {
-    return
+    const content =
         \\# .var Research
         \\
         \\Store decision rationale, source summaries, and implementation snapshots here.
     ;
+    return content;
 }
 
 fn scaffoldHarness(allocator: std.mem.Allocator, workspace_root: []const u8, force_overwrite: bool) !ScaffoldStats {
@@ -497,6 +508,7 @@ fn scaffoldHarness(allocator: std.mem.Allocator, workspace_root: []const u8, for
         try fsutil.join(allocator, &.{ workspace_root, ".var", "changelog" }),
         try fsutil.join(allocator, &.{ workspace_root, ".var", "docs" }),
         try fsutil.join(allocator, &.{ workspace_root, ".var", "sessions" }),
+        try fsutil.join(allocator, &.{ workspace_root, ".var", "auth" }),
         try fsutil.join(allocator, &.{ workspace_root, ".var", "research" }),
         try fsutil.join(allocator, &.{ workspace_root, ".var", "worktrees" }),
         try fsutil.join(allocator, &.{ workspace_root, ".var", "backup" }),

@@ -1,4 +1,5 @@
 const std = @import("std");
+const auth_resolver = @import("auth_resolver.zig");
 const fsutil = @import("fsutil.zig");
 const types = @import("types.zig");
 
@@ -50,10 +51,18 @@ pub fn loadFromEnvFile(allocator: std.mem.Allocator, env_path: []const u8) !type
         }
     }
 
+    const resolved_base_url = openai_base_url orelse return Error.MissingKey;
+    const resolved_api_key = openai_api_key orelse return Error.MissingKey;
+    const resolved_model = openai_model orelse return Error.MissingKey;
+    const provider_id = inferProviderId(resolved_base_url, resolved_model);
+
     return .{
-        .openai_base_url = openai_base_url orelse return Error.MissingKey,
-        .openai_api_key = openai_api_key orelse return Error.MissingKey,
-        .openai_model = openai_model orelse return Error.MissingKey,
+        .openai_base_url = resolved_base_url,
+        .openai_api_key = resolved_api_key,
+        .openai_model = resolved_model,
+        .auth_provider = try allocator.dupe(u8, provider_id),
+        .subscription_plan_label = if (isZaiProvider(provider_id)) try allocator.dupe(u8, resolved_model) else null,
+        .subscription_status = if (isZaiProvider(provider_id)) try allocator.dupe(u8, "active") else null,
         .harness_max_steps = harness_max_steps,
         .workspace_root = workspace_root orelse try allocator.dupe(u8, "."),
     };
@@ -63,7 +72,10 @@ pub fn loadDefault(allocator: std.mem.Allocator, workspace_root: []const u8) !ty
     const env_path = try std.fs.path.join(allocator, &.{ workspace_root, ".env" });
     defer allocator.free(env_path);
 
-    var config = try loadFromEnvFile(allocator, env_path);
+    var config = loadFromEnvFile(allocator, env_path) catch |err| switch (err) {
+        error.FileNotFound, Error.MissingKey => return loadDefaultFromAuthOnly(allocator, workspace_root),
+        else => return err,
+    };
 
     const canonical_workspace_root = try canonicalizeWorkspaceRoot(
         allocator,
@@ -72,7 +84,69 @@ pub fn loadDefault(allocator: std.mem.Allocator, workspace_root: []const u8) !ty
     );
     allocator.free(config.workspace_root);
     config.workspace_root = canonical_workspace_root;
+
+    var resolved_auth = try auth_resolver.resolveProviderAuth(allocator, config.workspace_root, .{
+        .provider_id = config.auth_provider orelse inferProviderId(config.openai_base_url, config.openai_model),
+        .base_url = config.openai_base_url,
+        .api_key = config.openai_api_key,
+        .model = config.openai_model,
+        .subscription_plan_id = if (isZaiProvider(config.auth_provider orelse "")) "zai-coding-plan" else null,
+        .subscription_plan_label = config.subscription_plan_label,
+        .subscription_status = config.subscription_status,
+        .subscription_source = "manual",
+    });
+    defer resolved_auth.deinit(allocator);
+
+    try applyResolvedAuth(allocator, &config, resolved_auth);
     return config;
+}
+
+fn loadDefaultFromAuthOnly(allocator: std.mem.Allocator, workspace_root: []const u8) !types.Config {
+    const canonical_workspace_root = try canonicalizeWorkspaceRoot(allocator, workspace_root, ".");
+    errdefer allocator.free(canonical_workspace_root);
+
+    var resolved_auth = try auth_resolver.resolveProviderAuth(allocator, canonical_workspace_root, null);
+    defer resolved_auth.deinit(allocator);
+
+    return .{
+        .openai_base_url = try allocator.dupe(u8, resolved_auth.base_url),
+        .openai_api_key = try allocator.dupe(u8, resolved_auth.api_key),
+        .openai_model = try allocator.dupe(u8, resolved_auth.model),
+        .auth_provider = try allocator.dupe(u8, resolved_auth.provider_id),
+        .subscription_plan_label = if (resolved_auth.subscription_plan_label) |value| try allocator.dupe(u8, value) else null,
+        .subscription_status = if (resolved_auth.subscription_status) |value| try allocator.dupe(u8, value) else null,
+        .harness_max_steps = 1,
+        .workspace_root = canonical_workspace_root,
+    };
+}
+
+fn applyResolvedAuth(allocator: std.mem.Allocator, config: *types.Config, resolved_auth: auth_resolver.ResolvedAuth) !void {
+    const next_base_url = try allocator.dupe(u8, resolved_auth.base_url);
+    errdefer allocator.free(next_base_url);
+    const next_api_key = try allocator.dupe(u8, resolved_auth.api_key);
+    errdefer allocator.free(next_api_key);
+    const next_model = try allocator.dupe(u8, resolved_auth.model);
+    errdefer allocator.free(next_model);
+    const next_auth_provider = try allocator.dupe(u8, resolved_auth.provider_id);
+    errdefer allocator.free(next_auth_provider);
+    const next_subscription_plan_label = if (resolved_auth.subscription_plan_label) |value| try allocator.dupe(u8, value) else null;
+    errdefer if (next_subscription_plan_label) |value| allocator.free(value);
+    const next_subscription_status = if (resolved_auth.subscription_status) |value| try allocator.dupe(u8, value) else null;
+    errdefer if (next_subscription_status) |value| allocator.free(value);
+
+    allocator.free(config.openai_base_url);
+    allocator.free(config.openai_api_key);
+    allocator.free(config.openai_model);
+    if (config.auth_provider) |value| allocator.free(value);
+    if (config.subscription_plan_label) |value| allocator.free(value);
+    if (config.subscription_status) |value| allocator.free(value);
+
+    config.openai_base_url = next_base_url;
+    config.openai_api_key = next_api_key;
+    config.openai_model = next_model;
+    config.auth_provider = next_auth_provider;
+    config.subscription_plan_label = next_subscription_plan_label;
+    config.subscription_status = next_subscription_status;
 }
 
 fn canonicalizeWorkspaceRoot(
@@ -102,4 +176,14 @@ fn trimQuotes(value: []const u8) []const u8 {
 fn dupeReplacing(allocator: std.mem.Allocator, existing: ?[]u8, value: []const u8) ![]u8 {
     if (existing) |previous| allocator.free(previous);
     return allocator.dupe(u8, value);
+}
+
+fn inferProviderId(base_url: []const u8, model: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, base_url, "z.ai") != null) return "zai";
+    if (std.mem.indexOf(u8, model, "GLM") != null or std.mem.indexOf(u8, model, "glm") != null) return "zai";
+    return "openai-compatible";
+}
+
+fn isZaiProvider(provider_id: []const u8) bool {
+    return std.mem.eql(u8, provider_id, "zai");
 }

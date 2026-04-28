@@ -1,238 +1,169 @@
 # VAR1 Architecture
 
-This document is the canonical architecture map for the current `VAR1` runtime. It describes the implementation that exists today.
+This is the canonical architecture map for the current `VAR1` runtime.
 
-## Architecture Lock
+## Architecture lock
 
-- one execution primitive: run and task
-- one durable source of truth: `.var/sessions/<task-id>/`
-- subagent = normal child run with `parent_task_id`
-- operator session/chat = same canonical task id plus `turns.jsonl`
-- canonical local command boundary for `run`, `health`, and `tools` is JSON-RPC 2.0 over stdio with Content-Length framing (`kernel-stdio`)
-- root harness tools operate inside `.var/` only, are exposed only for harness-relevant tasks, and do not create a second state system
-- workbench = thin projection over canonical task state
-- background web execution reuses `loop.runPromptWithOptions(...)`
-- UI refresh is pull-based polling, not server-pushed streaming
+- one execution primitive: session
+- one durable source of truth: `.var/sessions/<id>/`
+- one canonical host protocol: JSON-RPC 2.0 over stdio with Content-Length framing
+- one bridge surface for browser clients: `/rpc`, `/events`, `/api/health`
+- one executable name: `VAR1`
+- one hidden host mode: `kernel-stdio`
+- one external browser client: `apps/frontend/var1-client`
+- temporary `/api/tasks*` compatibility exists only at the HTTP bridge edge
 
-## 1. Runtime Slice
+## Runtime slice
 
 ```mermaid
 flowchart TB
-  operator["Operator"] --> ps["scripts/*.ps1"]
-  operator --> sh["scripts/*.sh"]
-  operator --> browser["Browser"]
+  cli["VAR1 CLI"] --> client["src/cli.zig"]
+  browser["apps/frontend/var1-client"] --> bridge["src/web.zig"]
 
-  ps --> exe["zig-out/bin/VAR1.exe"]
-  sh --> exe
-  browser --> serve["VAR1 serve"]
+  client --> rpcClient["Local stdio RPC client"]
+  rpcClient --> kernel["VAR1 kernel-stdio"]
+  bridge --> kernel
 
-  exe --> main["src/main.zig"]
-  main --> cli["src/cli.zig"]
-
-  cli --> serve
-  cli --> rpcclient["run | health | tools via local RPC client"]
-  rpcclient --> rpcserver["kernel-stdio JSON-RPC host"]
-
-  serve --> web["src/web.zig"]
-  web --> ui["embed: src/ui/index.html"]
-  web --> store["src/store.zig"]
-  web --> docs["src/docs_sync.zig"]
-  web --> loop["src/loop.zig"]
-
-  rpcserver --> loop
-
-  loop --> provider["src/provider.zig"]
-  loop --> tools["src/tools.zig"]
+  kernel --> host["src/stdio_rpc.zig"]
+  host --> executor["src/loop.zig"]
+  executor --> context["src/core/context/builder.zig"]
+  executor --> store["src/store.zig"]
+  executor --> provider["src/provider.zig"]
+  executor --> tools["src/tools.zig"]
+  tools --> agents["src/agents.zig"]
   tools --> harness["src/harness_tools.zig"]
-  loop --> agents["src/agents.zig"]
-  loop --> store
-  loop --> docs
+  executor --> docs["src/docs_sync.zig"]
 
-  store --> truth[".var/sessions/<task-id>/session.json + turns.jsonl + journal.jsonl + answer.txt"]
-  docs --> projection[".var/{todos/task,changelog,memories}"]
-  harness --> rootops[".var/{docs,research,worktrees,backup}"]
-  provider --> api["OpenAI-compatible API"]
+  context --> store
+  store --> sessionRoot[".var/sessions/<id>/session.json + messages.jsonl + context.jsonl + events.jsonl + output.txt"]
+  docs --> processRoot[".var/todos + .var/changelog + .var/memories"]
 ```
 
-## 2. Workbench Request Flow
+## Session message flow
 
 ```mermaid
 sequenceDiagram
-  actor O as Operator Browser
-  participant W as web.zig
+  actor C as Client
+  participant B as Bridge or CLI
+  participant K as kernel-stdio
+  participant E as loop.zig
+  participant X as context builder
   participant S as store.zig
-  participant D as docs_sync.zig
-  participant L as loop.zig
   participant P as provider.zig
-  participant M as Model API
 
-  O->>W: POST /api/tasks { prompt }
-  W->>S: initTaskWithOptions(status=pending)
-  S-->>W: task id
-  W->>D: writePending(...)
-  W->>D: appendLog("workbench task enqueued")
-  W->>L: start background thread with task_id
-  W-->>O: 201 task payload
-
-  O->>W: POST /api/tasks/:id/messages { prompt }
-  W->>S: appendConversationTurn(user)
-  W->>S: setTaskPrompt(status=pending)
-  W->>D: writePending(...)
-  W->>L: start background thread with same task_id
-  W-->>O: 200 task payload
-
-  L->>S: appendJournal(task_started)
-  L->>S: read canonical transcript turns for task_id
-  L->>P: completeWithTransport(...)
-  P->>M: completion request
-  M-->>P: tool calls or final answer
-  P-->>L: completion response
-  L->>S: appendJournal(...)
-  L->>S: upsert assistant turn on same task
-  L->>S: writeFinalAnswer(...)
-  L->>S: setTaskStatus(completed or failed)
-  L->>D: completeTask(...) or failed todo-slice update
-
-  O->>W: GET /api/tasks or /api/tasks/:id or /api/tasks/:id/turns or /api/tasks/:id/journal
-  W->>S: read task records, transcript turns, and journal lines
-  S-->>W: canonical task state
-  W-->>O: JSON projection
+  C->>B: session/create or session/send
+  B->>K: JSON-RPC request
+  K->>E: dispatch session lifecycle call
+  E->>S: load or create session
+  E->>X: build model-visible transcript view
+  X->>S: read messages and latest context checkpoint
+  X-->>E: summary plus recent raw transcript
+  E->>P: provider turn
+  P-->>E: assistant content or tool calls
+  E->>S: append messages and events
+  E->>S: write output and status
+  E-->>K: session result
+  E-->>K: session/event notifications
+  K-->>B: JSON-RPC result
+  B-->>C: response or UI refresh
 ```
 
-## 3. Delegation Model
-
-```mermaid
-flowchart TB
-  parent["Parent run"]
-  tool["launch_agent tool call"]
-  child["Child run"]
-  relation["parent_task_id on child task"]
-  store[".var/sessions/<task-id>/"]
-  ui["Workbench task tree"]
-
-  parent --> tool
-  tool --> child
-  parent --> store
-  child --> store
-  relation --> child
-  relation --> ui
-  store --> ui
-```
-
-All durable child identity, progress, and final state are recoverable from canonical task records. `src/agents.zig` is spawn and control glue over that canonical state, not a second registry.
-Child supervision snapshots now include lifecycle and heartbeat metadata (`LIFECYCLE_STATE`, `HEARTBEAT_*`, `NEXT_PARENT_ACTION`) so parent runs can reason about done, waiting-for-input, processing, and errored states without introducing another registry.
-
-## 4. Task State Machine
+## Session state machine
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Pending
-  Pending: session.json status=pending
-  Pending: todo slice written by web or CLI bootstrap
+  [*] --> Initialized
 
-  Pending --> Running: loop starts on task id
-  Running: journal contains task_started
-  Running: tool and assistant events append to journal
-
-  Running --> Completed: assistant answer persisted
-  Completed: answer.txt written
-  Completed: session.json status=completed
-  Completed: changelog slice written
-
-  Running --> Failed: provider failure or step budget exhausted
-  Failed: session.json status=failed
-  Failed: failure_reason set when available
-  Failed: active todo slice still reflects failure
+  Initialized --> Running: session/send
+  Running --> Completed: assistant output persisted
+  Running --> Failed: provider or execution failure
+  Running --> Cancelled: cancellation requested
 
   Completed --> [*]
   Failed --> [*]
+  Cancelled --> [*]
 ```
 
-## 5. Workbench Surface
+## Durable contract
 
-The embedded workbench in `src/ui/index.html` stays intentionally small, but it now reads as a clean local single-user operator surface:
+Every session directory contains:
 
-- top bar: connection state, workspace root, and active model
-- left rail: newest-first task tree with child indentation, counts, and focused status filters
-- main thread: task record, latest event, child runs, final answer, and a merged transcript-plus-journal timeline from the same task id
-- bottom composer: create a new canonical task or resume a completed session by selected or pasted id on the same canonical task record
-- action row: refresh, copy answer, and resume failed or pending runs on the selected canonical task
-- refresh transport: `setInterval(..., 1800)` plus request cancellation on overlapping browser fetches
+- `session.json`
+- `messages.jsonl`
+- `context.jsonl`
+- `events.jsonl`
+- `output.txt`
 
-There is no browser-only state model. The selected task and hydrated panes are read models over the task API.
+`messages.jsonl` is the complete append-only transcript. `context.jsonl` is a compact checkpoint ledger used by the context builder to create model-visible history without rewriting transcript history.
 
-## 6. Resumability Boundary
+`store.ensureStoreReady(...)` upgrades legacy layouts before normal execution:
 
-`VAR1` resumes canonical tasks and can continue operator turns on that same task id, but it still does not introduce a separate chat-session runtime.
+- `.harness/tasks/<id>/task.json` -> `.var/sessions/<id>/session.json`
+- `turns.jsonl` -> `messages.jsonl`
+- `journal.jsonl` -> `events.jsonl`
+- `answer.txt` -> `output.txt`
 
-Supported:
+Legacy ids such as `task-...` remain valid as opaque session ids.
 
-- `run --task-id "<task-id>"`
-- `POST /api/tasks/:id/resume`
-- `POST /api/tasks/:id/messages`
-- journal and final-answer inspection for stopped tasks
-- replaying prior transcript turns from `turns.jsonl` on the same task id
+## Module ownership
 
-Forward-only boundary:
+- `src/types.zig`
+  shared runtime types and session contracts
+- `src/store.zig`
+  canonical session storage plus one-time migration
+- `src/loop.zig`
+  kernel-owned execution loop
+- `src/core/context/builder.zig`
+  sole owner for turning session storage into provider-ready transcript messages
+- `src/core/tools/`
+  typed tool socket namespace and validation facade around the current tool runtime
+- `src/core/plugins/`
+  plugin manifest/socket contracts only; plugin implementations do not live in core
+- `src/protocol_types.zig`
+  JSON-RPC methods and payload shapes
+- `src/stdio_rpc.zig`
+  Content-Length framed stdio host and local child-process client
+- `src/web.zig`
+  HTTP bridge plus temporary task-facade translation
+- `src/cli.zig`
+  thin protocol-backed CLI
+- `apps/frontend/var1-client`
+  external static browser client over `/rpc` and `/events`
 
-- missing `turns.jsonl` is treated as an empty transcript instead of reconstructing from legacy lineage
-- no legacy lineage fields are persisted in canonical records
+## Compatibility boundary
 
-Not supported:
+The bridge still exposes `/api/tasks*` for one wave, but only as translation:
 
-- replaying the internal tool transcript back into the model
-- a second persisted conversation object
-- live websocket streaming
+- `task` in compatibility responses maps to `session`
+- `answer` maps to `output`
+- `turns` maps to `messages`
+- `journal` maps to `events`
 
-## 7. Module Ownership
+No task-native execution logic remains in the kernel.
 
-- [src/cli.zig](./src/cli.zig) - CLI parsing and top-level command dispatch
-- [src/web.zig](./src/web.zig) - HTTP route layer, embedded UI serving, task API projection
-- [src/loop.zig](./src/loop.zig) - canonical model and tool loop
-- [src/store.zig](./src/store.zig) - task records, canonical transcript turns, final answers, newest-first listing, and journal reads
-- [src/docs_sync.zig](./src/docs_sync.zig) - `.var` readable tracking gate for run log, memories, active todo slices, and changelog slices
-- [src/provider.zig](./src/provider.zig) - native HTTP and TLS transport to OpenAI-compatible APIs
-- [src/protocol_types.zig](./src/protocol_types.zig) - canonical JSON-RPC method names, state labels, and method payload shapes
-- [src/stdio_rpc.zig](./src/stdio_rpc.zig) - Content-Length framed stdio JSON-RPC host plus the local CLI child-process client
-- [src/tools.zig](./src/tools.zig) - top-level tool catalog, file tools, and delegation dispatch
-- [src/harness_tools.zig](./src/harness_tools.zig) - canonical root-harness tool runtime for init, domain-state, backup, worktree, and instruction-ingestion actions
-- [src/agents.zig](./src/agents.zig) - child-run spawn and supervision over canonical task state
-- [src/ui/index.html](./src/ui/index.html) - single-file workbench
+## Pluggability boundary
 
-## 8. Validated Windows Operator Lane
+`core/` contains kernel capability domains, not plugin names. The current socket hierarchy is intentionally small:
 
-PowerShell is the native operator path for this checkout.
+- `core/context/` owns model-visible transcript assembly.
+- `core/tools/` owns tool socket contracts and delegates to the current runtime body.
+- `core/plugins/` owns manifest validation for future plugin roots.
 
-Validated commands:
+Future plugin implementations should live outside `core/` and register through typed sockets. Auto-discovery is not enabled until manifest validation, explicit enablement, deterministic load order, and lifecycle tests are in place.
 
-```powershell
-Set-Location E:\Workspaces\01_Projects\01_Github\VANTARI-ONE\apps\backend\variant-1
-.\scripts\zigw.ps1 build test --summary all
-.\zig-out\bin\VAR1.exe health --json
-.\scripts\health.ps1
-.\scripts\local_gemma_smoke.ps1
-```
+## Validation lane
 
-Validated outcomes in the current repo state:
+The current validation lane should always prove these slices together:
 
-- `.\scripts\zigw.ps1 build test --summary all` is green at `58/58 tests passed`
-- Windows build succeeded at `3/3 steps`
-- `.\zig-out\bin\VAR1.exe health --json` emitted the structured readiness payload with `ok`, `model`, `workspace_root`, and `openai_base_url`
-- `.\scripts\health.ps1` printed the plain-text readiness snapshot without sending a model request
-- `.\zig-out\bin\VAR1.exe tools --json` now advertises the canonical `search_files` contract backed by `iex`, while keeping `rg_search` only as a compatibility alias inside the runtime
-- `.\zig-out\bin\VAR1.exe help serve` now exposes `GET /api/tasks/:id/turns` and `POST /api/tasks/:id/messages` in the shipped operator help surface
-- `.\scripts\local_gemma_smoke.ps1` is green in the current repo state, including direct `run --prompt`, delegated run functional acceptance of `3`, and workbench route validation on canonical task `task-1776886949200-b993269644a3f80`
-- last known Playwright sanity pass is from `2026-04-21` (`VAR1 Workbench`, no browser console errors)
+- `build test`
+- `health`
+- direct `run`
+- delegated child-session `run`
+- bridge root response is text, not embedded HTML
+- bridge task-facade routes still work
+- external client exists at `apps/frontend/var1-client`
 
-## 9. Deliberate Boundaries
+Latest local Windows validation on 2026-04-28:
 
-This slice does not add:
-
-- a second session runtime
-- browser-owned durable state
-- a websocket event bus
-- a separate product database
-- a second root harness ledger outside `.var/`
-- any ownership path outside `.var/sessions/<task-id>/` for durable run state
-
-The productization move was to expose the canonical harness through a web projection, not to invent a second system.
+- `.\scripts\zigw.ps1 build test --summary all` -> `67/67 tests passed`
+- `.\scripts\health.ps1` -> `status: ready`

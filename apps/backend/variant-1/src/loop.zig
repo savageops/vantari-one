@@ -1,36 +1,65 @@
 const std = @import("std");
 const docs_sync = @import("docs_sync.zig");
+const context_builder = @import("core/context/index.zig");
 const provider = @import("provider.zig");
 const store = @import("store.zig");
 const tools = @import("tools.zig");
 const types = @import("types.zig");
 
-// TODO: Add compaction only when the tool-capable loop needs it.
-
 pub const Error = error{
+    Cancelled,
     MissingAssistantContent,
     StepLimitExceeded,
 };
 
 pub const Hooks = struct {
     context: ?*anyopaque = null,
-    onTaskInitializedFn: ?*const fn (ctx: ?*anyopaque, task_id: []const u8) anyerror!void = null,
+    onSessionInitializedFn: ?*const fn (ctx: ?*anyopaque, session_id: []const u8) anyerror!void = null,
+    onSessionEventFn: ?*const fn (
+        ctx: ?*anyopaque,
+        session_id: []const u8,
+        event_type: []const u8,
+        message: []const u8,
+        status: []const u8,
+        timestamp_ms: i64,
+    ) anyerror!void = null,
+    shouldCancelFn: ?*const fn (ctx: ?*anyopaque, session_id: []const u8) bool = null,
 
-    pub fn onTaskInitialized(self: Hooks, task_id: []const u8) !void {
-        if (self.onTaskInitializedFn) |callback| {
-            try callback(self.context, task_id);
+    pub fn onSessionInitialized(self: Hooks, session_id: []const u8) !void {
+        if (self.onSessionInitializedFn) |callback| {
+            try callback(self.context, session_id);
         }
+    }
+
+    pub fn onSessionEvent(
+        self: Hooks,
+        session_id: []const u8,
+        event_type: []const u8,
+        message: []const u8,
+        status: []const u8,
+        timestamp_ms: i64,
+    ) !void {
+        if (self.onSessionEventFn) |callback| {
+            try callback(self.context, session_id, event_type, message, status, timestamp_ms);
+        }
+    }
+
+    pub fn shouldCancel(self: Hooks, session_id: []const u8) bool {
+        if (self.shouldCancelFn) |callback| {
+            return callback(self.context, session_id);
+        }
+        return false;
     }
 };
 
 pub const RunOptions = struct {
     transport: provider.Transport,
     execution_context: tools.ExecutionContext,
-    task_id: ?[]const u8 = null,
+    session_id: ?[]const u8 = null,
     hooks: Hooks = .{},
 };
 
-pub fn runPrompt(allocator: std.mem.Allocator, config: types.Config, prompt: []const u8) !types.RunResult {
+pub fn runPrompt(allocator: std.mem.Allocator, config: types.Config, prompt: []const u8) !types.SessionRunResult {
     return runPromptWithOptions(allocator, config, prompt, .{
         .transport = .{
             .context = null,
@@ -47,7 +76,7 @@ pub fn runPromptWithTransport(
     config: types.Config,
     prompt: []const u8,
     transport: provider.Transport,
-) !types.RunResult {
+) !types.SessionRunResult {
     return runPromptWithOptions(allocator, config, prompt, .{
         .transport = transport,
         .execution_context = .{
@@ -61,36 +90,37 @@ pub fn runPromptWithOptions(
     config: types.Config,
     prompt: []const u8,
     options: RunOptions,
-) !types.RunResult {
+) !types.SessionRunResult {
+    try store.ensureStoreReady(allocator, config.workspace_root);
     try docs_sync.ensureRunStart(allocator, config.workspace_root);
 
-    var task = if (options.task_id) |existing_task_id|
-        try store.readTaskRecord(allocator, config.workspace_root, existing_task_id)
+    var session = if (options.session_id) |existing_session_id|
+        try store.readSessionRecord(allocator, config.workspace_root, existing_session_id)
     else
-        try store.initTask(allocator, config.workspace_root, prompt);
-    defer task.deinit(allocator);
+        try store.initSession(allocator, config.workspace_root, prompt);
+    defer session.deinit(allocator);
 
-    const effective_prompt = task.prompt;
+    if (session.status == .cancelled) return Error.Cancelled;
 
-    if (options.task_id != null) {
-        try store.setTaskStatus(allocator, config.workspace_root, &task, .running);
-    }
-
-    try options.hooks.onTaskInitialized(task.id);
-
-    try store.appendJournal(allocator, config.workspace_root, task.id, .{
-        .event_type = "task_started",
-        .message = "Harness task initialized.",
-        .timestamp_ms = std.time.milliTimestamp(),
-    });
+    try store.setSessionStatus(allocator, config.workspace_root, &session, .running);
+    try options.hooks.onSessionInitialized(session.id);
+    try recordSessionEvent(
+        allocator,
+        config.workspace_root,
+        options.hooks,
+        session.id,
+        "session_started",
+        "Harness session initialized.",
+        session.status,
+    );
     try docs_sync.writePending(allocator, config.workspace_root, .{
-        .task_id = task.id,
-        .status = types.statusLabel(task.status),
-        .prompt = task.prompt,
-        .answer = "",
-        .updated_at_ms = task.updated_at_ms,
+        .session_id = session.id,
+        .status = types.statusLabel(session.status),
+        .prompt = session.prompt,
+        .output = "",
+        .updated_at_ms = session.updated_at_ms,
     });
-    try docs_sync.appendLog(allocator, config.workspace_root, "task started");
+    try docs_sync.appendLog(allocator, config.workspace_root, "session started");
 
     var messages = std.array_list.Managed(types.ChatMessage).init(allocator);
     defer {
@@ -100,10 +130,10 @@ pub fn runPromptWithOptions(
 
     var execution_context = options.execution_context;
     execution_context.workspace_root = config.workspace_root;
-    if (execution_context.parent_task_id == null) {
-        execution_context.parent_task_id = task.id;
+    if (execution_context.parent_session_id == null) {
+        execution_context.parent_session_id = session.id;
     }
-    if (!execution_context.harness_tools_enabled and tools.harnessToolsRelevant(effective_prompt)) {
+    if (!execution_context.harness_tools_enabled and tools.harnessToolsRelevant(session.prompt)) {
         execution_context.harness_tools_enabled = true;
     }
 
@@ -111,19 +141,24 @@ pub fn runPromptWithOptions(
     defer allocator.free(system_prompt);
 
     try messages.append(try types.initTextMessage(allocator, .system, system_prompt));
-    appendConversationMessages(allocator, config.workspace_root, &messages, task) catch |err| {
-        try failTask(allocator, config.workspace_root, &task, @errorName(err));
+    context_builder.appendProviderMessages(allocator, config.workspace_root, &messages, session) catch |err| {
+        try failSession(allocator, config.workspace_root, options.hooks, &session, @errorName(err));
         return err;
     };
 
     var requires_child_supervision = false;
     var step: usize = 0;
     while (step < config.harness_max_steps) : (step += 1) {
+        if (options.hooks.shouldCancel(session.id)) {
+            try cancelSession(allocator, config.workspace_root, options.hooks, &session, "Cancellation requested.");
+            return Error.Cancelled;
+        }
+
         const completion = provider.completeWithTransport(allocator, config, .{
             .messages = messages.items,
             .tool_definitions = tools.builtinDefinitionsForContext(execution_context),
         }, options.transport) catch |err| {
-            try failTask(allocator, config.workspace_root, &task, @errorName(err));
+            try failSession(allocator, config.workspace_root, options.hooks, &session, @errorName(err));
             return err;
         };
         defer completion.deinit(allocator);
@@ -134,27 +169,39 @@ pub fn runPromptWithOptions(
 
             const request_log = try std.fmt.allocPrint(allocator, "tool requested: {s}", .{summary});
             defer allocator.free(request_log);
-
-            try store.appendJournal(allocator, config.workspace_root, task.id, .{
-                .event_type = "tool_requested",
-                .message = request_log,
-                .timestamp_ms = std.time.milliTimestamp(),
-            });
+            try recordSessionEvent(
+                allocator,
+                config.workspace_root,
+                options.hooks,
+                session.id,
+                "tool_requested",
+                request_log,
+                session.status,
+            );
             try docs_sync.appendLog(allocator, config.workspace_root, request_log);
 
             try messages.append(try types.initAssistantToolCallMessage(allocator, completion.content, completion.tool_calls));
 
             for (completion.tool_calls) |tool_call| {
+                if (options.hooks.shouldCancel(session.id)) {
+                    try cancelSession(allocator, config.workspace_root, options.hooks, &session, "Cancellation requested.");
+                    return Error.Cancelled;
+                }
+
                 const tool_result = try executeToolCall(allocator, execution_context, tool_call);
                 defer allocator.free(tool_result.output);
                 defer allocator.free(tool_result.log_line);
                 if (tool_result.launched_child) requires_child_supervision = true;
 
-                try store.appendJournal(allocator, config.workspace_root, task.id, .{
-                    .event_type = "tool_completed",
-                    .message = tool_result.log_line,
-                    .timestamp_ms = std.time.milliTimestamp(),
-                });
+                try recordSessionEvent(
+                    allocator,
+                    config.workspace_root,
+                    options.hooks,
+                    session.id,
+                    "tool_completed",
+                    tool_result.log_line,
+                    session.status,
+                );
                 try docs_sync.appendLog(allocator, config.workspace_root, tool_result.log_line);
                 try messages.append(try types.initToolMessage(allocator, tool_call.id, tool_result.output));
             }
@@ -167,11 +214,15 @@ pub fn runPromptWithOptions(
                 const child_summary = childStatusSummary(allocator, execution_context) catch ChildStatusSummary{};
                 if (child_summary.pending > 0) {
                     const waiting_message = "I will continue once agents complete; if any fail, I will follow up.";
-                    try store.appendJournal(allocator, config.workspace_root, task.id, .{
-                        .event_type = "task_waiting",
-                        .message = waiting_message,
-                        .timestamp_ms = std.time.milliTimestamp(),
-                    });
+                    try recordSessionEvent(
+                        allocator,
+                        config.workspace_root,
+                        options.hooks,
+                        session.id,
+                        "session_waiting",
+                        waiting_message,
+                        session.status,
+                    );
                     const waiting_log = try std.fmt.allocPrint(allocator, "parent waiting on child agents: {d} pending", .{child_summary.pending});
                     defer allocator.free(waiting_log);
                     try docs_sync.appendLog(allocator, config.workspace_root, waiting_log);
@@ -201,37 +252,45 @@ pub fn runPromptWithOptions(
                 requires_child_supervision = false;
             }
 
-            const final_content = try sanitizeOperatorResponse(allocator, effective_prompt, content);
-            defer allocator.free(final_content);
+            const final_output = try sanitizeOperatorResponse(allocator, session.prompt, content);
+            defer allocator.free(final_output);
+
             const final_timestamp = std.time.milliTimestamp();
-            try store.appendJournal(allocator, config.workspace_root, task.id, .{
+            try store.appendEvent(allocator, config.workspace_root, session.id, .{
                 .event_type = "assistant_response",
-                .message = final_content,
+                .message = final_output,
                 .timestamp_ms = final_timestamp,
             });
-            try store.upsertAssistantConversationTurn(allocator, config.workspace_root, task.id, final_content, final_timestamp);
-            try store.writeFinalAnswer(allocator, config.workspace_root, task.id, final_content);
-            try store.setTaskStatus(allocator, config.workspace_root, &task, .completed);
-            try docs_sync.completeTask(allocator, config.workspace_root, .{
-                .task_id = task.id,
-                .status = types.statusLabel(task.status),
-                .prompt = task.prompt,
-                .answer = final_content,
-                .updated_at_ms = task.updated_at_ms,
+            try options.hooks.onSessionEvent(
+                session.id,
+                "assistant_response",
+                final_output,
+                types.statusLabel(session.status),
+                final_timestamp,
+            );
+            try store.upsertAssistantSessionMessage(allocator, config.workspace_root, session.id, final_output, final_timestamp);
+            try store.writeOutput(allocator, config.workspace_root, session.id, final_output);
+            try store.setSessionStatus(allocator, config.workspace_root, &session, .completed);
+            try docs_sync.completeSession(allocator, config.workspace_root, .{
+                .session_id = session.id,
+                .status = types.statusLabel(session.status),
+                .prompt = session.prompt,
+                .output = final_output,
+                .updated_at_ms = session.updated_at_ms,
             });
-            try docs_sync.appendLog(allocator, config.workspace_root, "task completed");
+            try docs_sync.appendLog(allocator, config.workspace_root, "session completed");
 
             return .{
-                .task_id = try allocator.dupe(u8, task.id),
-                .answer = try allocator.dupe(u8, final_content),
+                .session_id = try allocator.dupe(u8, session.id),
+                .output = try allocator.dupe(u8, final_output),
             };
         }
 
-        try failTask(allocator, config.workspace_root, &task, "MissingAssistantContent");
+        try failSession(allocator, config.workspace_root, options.hooks, &session, "MissingAssistantContent");
         return Error.MissingAssistantContent;
     }
 
-    try failTask(allocator, config.workspace_root, &task, "StepLimitExceeded");
+    try failSession(allocator, config.workspace_root, options.hooks, &session, "StepLimitExceeded");
     return Error.StepLimitExceeded;
 }
 
@@ -272,9 +331,9 @@ const ChildStatusSummary = struct {
 
 fn childStatusSummary(allocator: std.mem.Allocator, execution_context: tools.ExecutionContext) !ChildStatusSummary {
     const service = execution_context.agent_service orelse return .{};
-    const parent_task_id = execution_context.parent_task_id orelse return .{};
+    const parent_session_id = execution_context.parent_session_id orelse return .{};
 
-    const listing = try service.list(allocator, parent_task_id);
+    const listing = try service.list(allocator, parent_session_id);
     defer allocator.free(listing);
 
     if (std.mem.eql(u8, std.mem.trim(u8, listing, " \r\n"), "No child agents.")) return .{};
@@ -290,7 +349,7 @@ fn childStatusSummary(allocator: std.mem.Allocator, execution_context: tools.Exe
             summary.pending += 1;
             continue;
         }
-        if (std.mem.eql(u8, status_label, "failed")) {
+        if (std.mem.eql(u8, status_label, "failed") or std.mem.eql(u8, status_label, "cancelled")) {
             summary.failed += 1;
         }
     }
@@ -308,7 +367,9 @@ fn statusLabelFromListLine(line: []const u8) ?[]const u8 {
 }
 
 fn isTerminalStatusLabel(status_label: []const u8) bool {
-    return std.mem.eql(u8, status_label, "completed") or std.mem.eql(u8, status_label, "failed");
+    return std.mem.eql(u8, status_label, "completed") or
+        std.mem.eql(u8, status_label, "failed") or
+        std.mem.eql(u8, status_label, "cancelled");
 }
 
 fn contentMentionsFailure(content: []const u8) bool {
@@ -318,6 +379,7 @@ fn contentMentionsFailure(content: []const u8) bool {
         "failure",
         "errored",
         "error",
+        "cancelled",
     };
 
     for (keywords) |keyword| {
@@ -437,44 +499,61 @@ fn indexOfIgnoreCasePos(haystack: []const u8, needle: []const u8, start: usize) 
     return null;
 }
 
-fn failTask(
+fn cancelSession(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
-    task: *types.TaskRecord,
+    hooks: Hooks,
+    session: *types.SessionRecord,
+    reason: []const u8,
+) !void {
+    try store.setSessionStatus(allocator, workspace_root, session, .cancelled);
+    try recordSessionEvent(allocator, workspace_root, hooks, session.id, "session_cancelled", reason, session.status);
+    try docs_sync.writePending(allocator, workspace_root, .{
+        .session_id = session.id,
+        .status = types.statusLabel(session.status),
+        .prompt = session.prompt,
+        .output = reason,
+        .updated_at_ms = session.updated_at_ms,
+    });
+    try docs_sync.appendLog(allocator, workspace_root, "session cancelled");
+}
+
+fn failSession(
+    allocator: std.mem.Allocator,
+    workspace_root: []const u8,
+    hooks: Hooks,
+    session: *types.SessionRecord,
     failure_reason: []const u8,
 ) !void {
-    try store.appendJournal(allocator, workspace_root, task.id, .{
-        .event_type = "task_failed",
-        .message = failure_reason,
-        .timestamp_ms = std.time.milliTimestamp(),
-    });
-    try store.setTaskFailure(allocator, workspace_root, task, failure_reason);
+    try recordSessionEvent(allocator, workspace_root, hooks, session.id, "session_failed", failure_reason, session.status);
+    try store.setSessionFailure(allocator, workspace_root, session, failure_reason);
     try docs_sync.writePending(allocator, workspace_root, .{
-        .task_id = task.id,
-        .status = types.statusLabel(task.status),
-        .prompt = task.prompt,
-        .answer = failure_reason,
-        .updated_at_ms = task.updated_at_ms,
+        .session_id = session.id,
+        .status = types.statusLabel(session.status),
+        .prompt = session.prompt,
+        .output = failure_reason,
+        .updated_at_ms = session.updated_at_ms,
     });
 
-    const log_line = try std.fmt.allocPrint(allocator, "task failed: {s}", .{failure_reason});
+    const log_line = try std.fmt.allocPrint(allocator, "session failed: {s}", .{failure_reason});
     defer allocator.free(log_line);
     try docs_sync.appendLog(allocator, workspace_root, log_line);
 }
 
-fn appendConversationMessages(
+fn recordSessionEvent(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
-    messages: *std.array_list.Managed(types.ChatMessage),
-    task: types.TaskRecord,
+    hooks: Hooks,
+    session_id: []const u8,
+    event_type: []const u8,
+    message: []const u8,
+    status: types.SessionStatus,
 ) !void {
-    const turns = try store.readConversationTurns(allocator, workspace_root, task.id);
-    defer types.deinitConversationTurns(allocator, turns);
-
-    for (turns) |turn| {
-        switch (turn.role) {
-            .user => try messages.append(try types.initTextMessage(allocator, .user, turn.content)),
-            .assistant => try messages.append(try types.initTextMessage(allocator, .assistant, turn.content)),
-        }
-    }
+    const timestamp_ms = std.time.milliTimestamp();
+    try store.appendEvent(allocator, workspace_root, session_id, .{
+        .event_type = event_type,
+        .message = message,
+        .timestamp_ms = timestamp_ms,
+    });
+    try hooks.onSessionEvent(session_id, event_type, message, types.statusLabel(status), timestamp_ms);
 }

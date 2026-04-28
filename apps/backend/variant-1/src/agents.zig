@@ -33,13 +33,13 @@ pub const Service = struct {
 
 const WatchJob = struct {
     workspace_root: []u8,
-    task_id: []u8,
+    session_id: []u8,
     child: std.process.Child,
 
     fn deinit(self: *WatchJob) void {
         const allocator = std.heap.page_allocator;
         allocator.free(self.workspace_root);
-        allocator.free(self.task_id);
+        allocator.free(self.session_id);
         allocator.destroy(self);
     }
 };
@@ -57,48 +57,48 @@ const ChildLifecycle = struct {
 fn launchFromHandle(
     ctx_ptr: ?*anyopaque,
     allocator: std.mem.Allocator,
-    parent_task_id: []const u8,
+    parent_session_id: []const u8,
     prompt: []const u8,
     requested_name: ?[]const u8,
 ) anyerror![]u8 {
     const service: *Service = @ptrCast(@alignCast(ctx_ptr.?));
-    return launch(service, allocator, parent_task_id, prompt, requested_name);
+    return launch(service, allocator, parent_session_id, prompt, requested_name);
 }
 
 fn statusFromHandle(
     ctx_ptr: ?*anyopaque,
     allocator: std.mem.Allocator,
-    parent_task_id: []const u8,
+    parent_session_id: []const u8,
     agent_name: []const u8,
 ) anyerror![]u8 {
     const service: *Service = @ptrCast(@alignCast(ctx_ptr.?));
-    return status(service, allocator, parent_task_id, agent_name);
+    return status(service, allocator, parent_session_id, agent_name);
 }
 
 fn waitFromHandle(
     ctx_ptr: ?*anyopaque,
     allocator: std.mem.Allocator,
-    parent_task_id: []const u8,
+    parent_session_id: []const u8,
     agent_name: []const u8,
     timeout_ms: usize,
 ) anyerror![]u8 {
     const service: *Service = @ptrCast(@alignCast(ctx_ptr.?));
-    return wait(service, allocator, parent_task_id, agent_name, timeout_ms);
+    return wait(service, allocator, parent_session_id, agent_name, timeout_ms);
 }
 
 fn listFromHandle(
     ctx_ptr: ?*anyopaque,
     allocator: std.mem.Allocator,
-    parent_task_id: []const u8,
+    parent_session_id: []const u8,
 ) anyerror![]u8 {
     const service: *Service = @ptrCast(@alignCast(ctx_ptr.?));
-    return list(service, allocator, parent_task_id);
+    return list(service, allocator, parent_session_id);
 }
 
 fn launch(
     service: *Service,
     allocator: std.mem.Allocator,
-    parent_task_id: []const u8,
+    parent_session_id: []const u8,
     prompt: []const u8,
     requested_name: ?[]const u8,
 ) ![]u8 {
@@ -110,34 +110,34 @@ fn launch(
         try newAgentName(allocator);
     defer allocator.free(agent_name);
 
-    if (try childNameExists(allocator, service.config.workspace_root, parent_task_id, agent_name)) {
+    if (try childNameExists(allocator, service.config.workspace_root, parent_session_id, agent_name)) {
         return Error.AgentNameTaken;
     }
 
-    var child_task = try store.initTaskWithOptions(allocator, service.config.workspace_root, prompt, .{
-        .status = .pending,
-        .parent_task_id = parent_task_id,
+    var child_session = try store.initSessionWithOptions(allocator, service.config.workspace_root, prompt, .{
+        .status = .initialized,
+        .parent_session_id = parent_session_id,
         .display_name = agent_name,
         .agent_profile = "subagent",
     });
-    defer child_task.deinit(allocator);
+    defer child_session.deinit(allocator);
 
-    try store.appendJournal(allocator, service.config.workspace_root, child_task.id, .{
-        .event_type = "task_delegated",
-        .message = "Child task delegated by parent task.",
+    try store.appendEvent(allocator, service.config.workspace_root, child_session.id, .{
+        .event_type = "session_delegated",
+        .message = "Child session delegated by parent session.",
         .timestamp_ms = std.time.milliTimestamp(),
     });
     try docs_sync.writePending(allocator, service.config.workspace_root, .{
-        .task_id = child_task.id,
-        .status = types.statusLabel(child_task.status),
-        .prompt = child_task.prompt,
-        .answer = "",
-        .updated_at_ms = child_task.updated_at_ms,
+        .session_id = child_session.id,
+        .status = types.statusLabel(child_session.status),
+        .prompt = child_session.prompt,
+        .output = "",
+        .updated_at_ms = child_session.updated_at_ms,
     });
 
-    const delegation_log = try std.fmt.allocPrint(allocator, "child task delegated: {s} -> {s}", .{
+    const delegation_log = try std.fmt.allocPrint(allocator, "child session delegated: {s} -> {s}", .{
         agent_name,
-        child_task.id,
+        child_session.id,
     });
     defer allocator.free(delegation_log);
     try docs_sync.appendLog(allocator, service.config.workspace_root, delegation_log);
@@ -151,8 +151,8 @@ fn launch(
     try argv.append("run");
     try argv.append("--json");
     try argv.append("--no-agent-tools");
-    try argv.append("--task-id");
-    try argv.append(child_task.id);
+    try argv.append("--session-id");
+    try argv.append(child_session.id);
 
     var child = std.process.Child.init(argv.items, allocator);
     child.cwd = service.config.workspace_root;
@@ -165,7 +165,7 @@ fn launch(
     errdefer std.heap.page_allocator.destroy(job);
     job.* = .{
         .workspace_root = try std.heap.page_allocator.dupe(u8, service.config.workspace_root),
-        .task_id = try std.heap.page_allocator.dupe(u8, child_task.id),
+        .session_id = try std.heap.page_allocator.dupe(u8, child_session.id),
         .child = child,
     };
 
@@ -174,12 +174,12 @@ fn launch(
 
     return std.fmt.allocPrint(
         allocator,
-        "AGENT_NAME {s}\nSTATUS {s}\nTASK_ID {s}\nPARENT_TASK_ID {s}\nPROMPT {s}",
+        "AGENT_NAME {s}\nSTATUS {s}\nSESSION_ID {s}\nPARENT_SESSION_ID {s}\nPROMPT {s}",
         .{
             agent_name,
-            types.statusLabel(child_task.status),
-            child_task.id,
-            parent_task_id,
+            types.statusLabel(child_session.status),
+            child_session.id,
+            parent_session_id,
             prompt,
         },
     );
@@ -188,35 +188,35 @@ fn launch(
 fn status(
     service: *Service,
     allocator: std.mem.Allocator,
-    parent_task_id: []const u8,
+    parent_session_id: []const u8,
     agent_name: []const u8,
 ) ![]u8 {
-    var task = try findChildTaskByName(allocator, service.config.workspace_root, parent_task_id, agent_name);
-    defer task.deinit(allocator);
-    return renderChildTask(allocator, service.config.workspace_root, task, .{});
+    var session = try findChildSessionByName(allocator, service.config.workspace_root, parent_session_id, agent_name);
+    defer session.deinit(allocator);
+    return renderChildSession(allocator, service.config.workspace_root, session, .{});
 }
 
 fn wait(
     service: *Service,
     allocator: std.mem.Allocator,
-    parent_task_id: []const u8,
+    parent_session_id: []const u8,
     agent_name: []const u8,
     timeout_ms: usize,
 ) ![]u8 {
     const started_at = std.time.milliTimestamp();
 
     while (true) {
-        var task = try findChildTaskByName(allocator, service.config.workspace_root, parent_task_id, agent_name);
-        defer task.deinit(allocator);
+        var session = try findChildSessionByName(allocator, service.config.workspace_root, parent_session_id, agent_name);
+        defer session.deinit(allocator);
 
-        if (isTerminal(task.status)) {
-            return renderChildTask(allocator, service.config.workspace_root, task, .{
+        if (isTerminal(session.status)) {
+            return renderChildSession(allocator, service.config.workspace_root, session, .{
                 .wait_state = "terminal",
             });
         }
 
         if (timeout_ms > 0 and std.time.milliTimestamp() - started_at >= @as(i64, @intCast(timeout_ms))) {
-            return renderChildTask(allocator, service.config.workspace_root, task, .{
+            return renderChildSession(allocator, service.config.workspace_root, session, .{
                 .wait_state = "timeout",
                 .wait_timeout_ms = timeout_ms,
             });
@@ -229,17 +229,17 @@ fn wait(
 fn list(
     service: *Service,
     allocator: std.mem.Allocator,
-    parent_task_id: []const u8,
+    parent_session_id: []const u8,
 ) ![]u8 {
-    const tasks_root = try store.tasksRootPath(allocator, service.config.workspace_root);
-    defer allocator.free(tasks_root);
+    const sessions_root = try store.sessionsRootPath(allocator, service.config.workspace_root);
+    defer allocator.free(sessions_root);
 
-    if (!fsutil.fileExists(tasks_root)) return allocator.dupe(u8, "No child agents.");
+    if (!fsutil.fileExists(sessions_root)) return allocator.dupe(u8, "No child agents.");
 
-    const tasks_root_abs = try fsutil.resolveAbsolute(allocator, tasks_root);
-    defer allocator.free(tasks_root_abs);
+    const sessions_root_abs = try fsutil.resolveAbsolute(allocator, sessions_root);
+    defer allocator.free(sessions_root_abs);
 
-    var dir = try std.fs.openDirAbsolute(tasks_root_abs, .{ .iterate = true });
+    var dir = try std.fs.openDirAbsolute(sessions_root_abs, .{ .iterate = true });
     defer dir.close();
 
     var iter = dir.iterate();
@@ -251,26 +251,26 @@ fn list(
     while (try iter.next()) |entry| {
         if (entry.kind != .directory) continue;
 
-        var task = store.readTaskRecord(allocator, service.config.workspace_root, entry.name) catch continue;
-        defer task.deinit(allocator);
+        var session = store.readSessionRecord(allocator, service.config.workspace_root, entry.name) catch continue;
+        defer session.deinit(allocator);
 
-        if (!matchesChildTask(task, parent_task_id, null)) continue;
+        if (!matchesChildSession(session, parent_session_id, null)) continue;
 
-        const latest_event = try store.readLatestJournalEvent(allocator, service.config.workspace_root, task.id);
+        const latest_event = try store.readLatestEvent(allocator, service.config.workspace_root, session.id);
         defer if (latest_event) |event| event.deinit(allocator);
-        const lifecycle = lifecycleForTask(task, latest_event, now_ms);
+        const lifecycle = lifecycleForSession(session, latest_event, now_ms);
 
         try output.writer().print(
-            "AGENT_NAME {s} STATUS {s} TASK_ID {s} LIFECYCLE_STATE {s} HEARTBEAT_AT_MS {d} HEARTBEAT_AGE_MS {d} NEXT_PARENT_ACTION {s} UPDATED_AT_MS {d}\n",
+            "AGENT_NAME {s} STATUS {s} SESSION_ID {s} LIFECYCLE_STATE {s} HEARTBEAT_AT_MS {d} HEARTBEAT_AGE_MS {d} NEXT_PARENT_ACTION {s} UPDATED_AT_MS {d}\n",
             .{
-                task.display_name orelse task.id,
-                types.statusLabel(task.status),
-                task.id,
+                session.display_name orelse session.id,
+                types.statusLabel(session.status),
+                session.id,
                 lifecycle.state,
                 lifecycle.heartbeat_at_ms,
                 lifecycle.heartbeat_age_ms,
                 lifecycle.next_parent_action,
-                task.updated_at_ms,
+                session.updated_at_ms,
             },
         );
         count += 1;
@@ -285,7 +285,7 @@ fn watchChildProcess(job: *WatchJob) void {
 
     const allocator = std.heap.page_allocator;
     const term = job.child.wait() catch {
-        finalizeAbnormalExit(allocator, job.workspace_root, job.task_id, "ChildWaitFailed", null) catch {};
+        finalizeAbnormalExit(allocator, job.workspace_root, job.session_id, "ChildWaitFailed", null) catch {};
         return;
     };
 
@@ -297,28 +297,28 @@ fn watchChildProcess(job: *WatchJob) void {
     };
 
     if (exit_code != 0) {
-        finalizeAbnormalExit(allocator, job.workspace_root, job.task_id, "ChildExitNonZero", exit_code) catch {};
+        finalizeAbnormalExit(allocator, job.workspace_root, job.session_id, "ChildExitNonZero", exit_code) catch {};
         return;
     }
 
-    var task = store.readTaskRecord(allocator, job.workspace_root, job.task_id) catch return;
-    defer task.deinit(allocator);
+    var session = store.readSessionRecord(allocator, job.workspace_root, job.session_id) catch return;
+    defer session.deinit(allocator);
 
-    if (isTerminal(task.status)) return;
-    finalizeAbnormalExit(allocator, job.workspace_root, job.task_id, "ChildExitWithoutTerminalState", exit_code) catch {};
+    if (isTerminal(session.status)) return;
+    finalizeAbnormalExit(allocator, job.workspace_root, job.session_id, "ChildExitWithoutTerminalState", exit_code) catch {};
 }
 
 fn finalizeAbnormalExit(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
-    task_id: []const u8,
+    session_id: []const u8,
     reason: []const u8,
     exit_code: ?i32,
 ) !void {
-    var task = store.readTaskRecord(allocator, workspace_root, task_id) catch return;
-    defer task.deinit(allocator);
+    var session = store.readSessionRecord(allocator, workspace_root, session_id) catch return;
+    defer session.deinit(allocator);
 
-    if (isTerminal(task.status)) return;
+    if (isTerminal(session.status)) return;
 
     const failure_reason = if (exit_code) |value|
         try std.fmt.allocPrint(allocator, "{s} (exit code {d})", .{ reason, value })
@@ -326,54 +326,54 @@ fn finalizeAbnormalExit(
         try allocator.dupe(u8, reason);
     defer allocator.free(failure_reason);
 
-    try store.appendJournal(allocator, workspace_root, task.id, .{
-        .event_type = "task_failed",
+    try store.appendEvent(allocator, workspace_root, session.id, .{
+        .event_type = "session_failed",
         .message = failure_reason,
         .timestamp_ms = std.time.milliTimestamp(),
     });
-    try store.setTaskFailure(allocator, workspace_root, &task, failure_reason);
+    try store.setSessionFailure(allocator, workspace_root, &session, failure_reason);
     try docs_sync.writePending(allocator, workspace_root, .{
-        .task_id = task.id,
-        .status = types.statusLabel(task.status),
-        .prompt = task.prompt,
-        .answer = failure_reason,
-        .updated_at_ms = task.updated_at_ms,
+        .session_id = session.id,
+        .status = types.statusLabel(session.status),
+        .prompt = session.prompt,
+        .output = failure_reason,
+        .updated_at_ms = session.updated_at_ms,
     });
 
-    const log_line = try std.fmt.allocPrint(allocator, "child task failed: {s} ({s})", .{
-        task.display_name orelse task.id,
+    const log_line = try std.fmt.allocPrint(allocator, "child session failed: {s} ({s})", .{
+        session.display_name orelse session.id,
         failure_reason,
     });
     defer allocator.free(log_line);
     try docs_sync.appendLog(allocator, workspace_root, log_line);
 }
 
-fn findChildTaskByName(
+fn findChildSessionByName(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
-    parent_task_id: []const u8,
+    parent_session_id: []const u8,
     agent_name: []const u8,
-) !types.TaskRecord {
-    const tasks_root = try store.tasksRootPath(allocator, workspace_root);
-    defer allocator.free(tasks_root);
+) !types.SessionRecord {
+    const sessions_root = try store.sessionsRootPath(allocator, workspace_root);
+    defer allocator.free(sessions_root);
 
-    if (!fsutil.fileExists(tasks_root)) return Error.UnknownAgent;
+    if (!fsutil.fileExists(sessions_root)) return Error.UnknownAgent;
 
-    const tasks_root_abs = try fsutil.resolveAbsolute(allocator, tasks_root);
-    defer allocator.free(tasks_root_abs);
+    const sessions_root_abs = try fsutil.resolveAbsolute(allocator, sessions_root);
+    defer allocator.free(sessions_root_abs);
 
-    var dir = try std.fs.openDirAbsolute(tasks_root_abs, .{ .iterate = true });
+    var dir = try std.fs.openDirAbsolute(sessions_root_abs, .{ .iterate = true });
     defer dir.close();
 
     var iter = dir.iterate();
     while (try iter.next()) |entry| {
         if (entry.kind != .directory) continue;
 
-        var task = store.readTaskRecord(allocator, workspace_root, entry.name) catch continue;
-        if (matchesChildTask(task, parent_task_id, agent_name)) {
-            return task;
+        var session = store.readSessionRecord(allocator, workspace_root, entry.name) catch continue;
+        if (matchesChildSession(session, parent_session_id, agent_name)) {
+            return session;
         }
-        task.deinit(allocator);
+        session.deinit(allocator);
     }
 
     return Error.UnknownAgent;
@@ -382,54 +382,54 @@ fn findChildTaskByName(
 fn childNameExists(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
-    parent_task_id: []const u8,
+    parent_session_id: []const u8,
     agent_name: []const u8,
 ) !bool {
-    _ = findChildTaskByName(allocator, workspace_root, parent_task_id, agent_name) catch |err| switch (err) {
+    _ = findChildSessionByName(allocator, workspace_root, parent_session_id, agent_name) catch |err| switch (err) {
         Error.UnknownAgent => return false,
         else => return err,
     };
     return true;
 }
 
-fn matchesChildTask(task: types.TaskRecord, parent_task_id: []const u8, agent_name: ?[]const u8) bool {
-    const task_parent = task.parent_task_id orelse return false;
-    if (!std.mem.eql(u8, task_parent, parent_task_id)) return false;
+fn matchesChildSession(session: types.SessionRecord, parent_session_id: []const u8, agent_name: ?[]const u8) bool {
+    const session_parent = session.parent_session_id orelse return false;
+    if (!std.mem.eql(u8, session_parent, parent_session_id)) return false;
 
     if (agent_name) |value| {
-        const task_name = task.display_name orelse return false;
-        return std.mem.eql(u8, task_name, value);
+        const session_name = session.display_name orelse return false;
+        return std.mem.eql(u8, session_name, value);
     }
 
     return true;
 }
 
-fn renderChildTask(
+fn renderChildSession(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
-    task: types.TaskRecord,
+    session: types.SessionRecord,
     options: RenderOptions,
 ) ![]u8 {
     var output = std.array_list.Managed(u8).init(allocator);
     errdefer output.deinit();
-    const latest_event = try store.readLatestJournalEvent(allocator, workspace_root, task.id);
+    const latest_event = try store.readLatestEvent(allocator, workspace_root, session.id);
     defer if (latest_event) |event| event.deinit(allocator);
-    const lifecycle = lifecycleForTask(task, latest_event, std.time.milliTimestamp());
+    const lifecycle = lifecycleForSession(session, latest_event, std.time.milliTimestamp());
 
     try output.writer().print(
-        "AGENT_NAME {s}\nSTATUS {s}\nTASK_ID {s}\n",
+        "AGENT_NAME {s}\nSTATUS {s}\nSESSION_ID {s}\n",
         .{
-            task.display_name orelse task.id,
-            types.statusLabel(task.status),
-            task.id,
+            session.display_name orelse session.id,
+            types.statusLabel(session.status),
+            session.id,
         },
     );
 
-    if (task.parent_task_id) |value| try output.writer().print("PARENT_TASK_ID {s}\n", .{value});
-    if (task.agent_profile) |value| try output.writer().print("AGENT_PROFILE {s}\n", .{value});
-    try output.writer().print("CREATED_AT_MS {d}\n", .{task.created_at_ms});
-    try output.writer().print("UPDATED_AT_MS {d}\n", .{task.updated_at_ms});
-    try output.writer().print("TERMINAL {s}\n", .{if (isTerminal(task.status)) "true" else "false"});
+    if (session.parent_session_id) |value| try output.writer().print("PARENT_SESSION_ID {s}\n", .{value});
+    if (session.agent_profile) |value| try output.writer().print("AGENT_PROFILE {s}\n", .{value});
+    try output.writer().print("CREATED_AT_MS {d}\n", .{session.created_at_ms});
+    try output.writer().print("UPDATED_AT_MS {d}\n", .{session.updated_at_ms});
+    try output.writer().print("TERMINAL {s}\n", .{if (isTerminal(session.status)) "true" else "false"});
     try output.writer().print("LIFECYCLE_STATE {s}\n", .{lifecycle.state});
     try output.writer().print("NEXT_PARENT_ACTION {s}\n", .{lifecycle.next_parent_action});
     try output.writer().print("HEARTBEAT_EVENT_TYPE {s}\n", .{lifecycle.heartbeat_event_type});
@@ -437,31 +437,31 @@ fn renderChildTask(
     try output.writer().print("HEARTBEAT_AGE_MS {d}\n", .{lifecycle.heartbeat_age_ms});
     if (options.wait_state) |value| try output.writer().print("WAIT_STATE {s}\n", .{value});
     if (options.wait_timeout_ms) |value| try output.writer().print("WAIT_TIMEOUT_MS {d}\n", .{value});
-    try output.writer().print("PROMPT {s}\n", .{task.prompt});
+    try output.writer().print("PROMPT {s}\n", .{session.prompt});
     if (latest_event) |event| {
         try output.writer().print("LATEST_EVENT_TYPE {s}\n", .{event.event_type});
         try output.writer().print("LATEST_EVENT_AT_MS {d}\n", .{event.timestamp_ms});
         try output.writer().print("LATEST_EVENT_MESSAGE {s}\n", .{event.message});
     }
 
-    if (task.status == .completed) {
-        if (try store.readFinalAnswer(allocator, workspace_root, task.id)) |answer| {
-            defer allocator.free(answer);
-            try output.writer().print("ANSWER {s}\n", .{answer});
+    if (session.status == .completed) {
+        if (try store.readOutput(allocator, workspace_root, session.id)) |result| {
+            defer allocator.free(result);
+            try output.writer().print("OUTPUT {s}\n", .{result});
         }
     }
 
-    if (task.failure_reason) |value| try output.writer().print("FAILURE_REASON {s}\n", .{value});
+    if (session.failure_reason) |value| try output.writer().print("FAILURE_REASON {s}\n", .{value});
 
     return output.toOwnedSlice();
 }
 
-fn lifecycleForTask(task: types.TaskRecord, latest_event: ?types.JournalEvent, now_ms: i64) ChildLifecycle {
-    const heartbeat_at_ms = if (latest_event) |event| event.timestamp_ms else task.updated_at_ms;
+fn lifecycleForSession(session: types.SessionRecord, latest_event: ?types.SessionEvent, now_ms: i64) ChildLifecycle {
+    const heartbeat_at_ms = if (latest_event) |event| event.timestamp_ms else session.updated_at_ms;
     const heartbeat_age_ms = if (now_ms > heartbeat_at_ms) now_ms - heartbeat_at_ms else 0;
     const heartbeat_event_type = if (latest_event) |event| event.event_type else "none";
 
-    if (task.status == .completed) {
+    if (session.status == .completed) {
         return .{
             .state = "completed",
             .next_parent_action = "collect_result",
@@ -471,7 +471,7 @@ fn lifecycleForTask(task: types.TaskRecord, latest_event: ?types.JournalEvent, n
         };
     }
 
-    if (task.status == .failed) {
+    if (session.status == .failed or session.status == .cancelled) {
         return .{
             .state = "errored",
             .next_parent_action = "follow_up",
@@ -481,7 +481,7 @@ fn lifecycleForTask(task: types.TaskRecord, latest_event: ?types.JournalEvent, n
         };
     }
 
-    if (task.status == .pending or heartbeat_age_ms >= heartbeat_stale_ms) {
+    if (session.status == .initialized or heartbeat_age_ms >= heartbeat_stale_ms) {
         return .{
             .state = "waiting_for_input",
             .next_parent_action = "follow_up",
@@ -512,6 +512,6 @@ fn newAgentName(allocator: std.mem.Allocator) ![]u8 {
     });
 }
 
-fn isTerminal(status_value: types.TaskStatus) bool {
-    return status_value == .completed or status_value == .failed;
+fn isTerminal(status_value: types.SessionStatus) bool {
+    return status_value == .completed or status_value == .failed or status_value == .cancelled;
 }

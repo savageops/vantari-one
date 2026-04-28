@@ -6,12 +6,10 @@ const provider = @import("provider.zig");
 const stdio_rpc = @import("stdio_rpc.zig");
 const web = @import("web.zig");
 
-// TODO: Keep the CLI small and operator-focused.
-
 const RunCliOptions = struct {
     prompt: ?[]const u8 = null,
     prompt_file: ?[]const u8 = null,
-    task_id: ?[]const u8 = null,
+    session_id: ?[]const u8 = null,
     json_output: bool = false,
     enable_agent_tools: bool = true,
 };
@@ -49,16 +47,19 @@ const ParsedHealthArguments = struct {
     help_requested: bool = false,
 };
 
-const ParsedSessionCreateResult = struct {
+const ParsedSessionSummary = struct {
     session_id: []const u8,
-    state: []const u8,
+    status: []const u8,
+    prompt: []const u8,
+    output: ?[]const u8 = null,
+};
+
+const ParsedSessionCreateResult = struct {
+    session: ParsedSessionSummary,
 };
 
 const ParsedSessionSendResult = struct {
-    session_id: []const u8,
-    task_id: []const u8,
-    state: []const u8,
-    answer: []const u8,
+    session: ParsedSessionSummary,
 };
 
 const ParsedHealthResult = struct {
@@ -66,6 +67,9 @@ const ParsedHealthResult = struct {
     model: []const u8,
     workspace_root: []const u8,
     openai_base_url: []const u8,
+    auth_provider: ?[]const u8 = null,
+    subscription_plan_label: ?[]const u8 = null,
+    subscription_status: ?[]const u8 = null,
 };
 
 const ParsedToolsListResult = struct {
@@ -80,16 +84,16 @@ pub const root_help_text =
     \\  VAR1 <command> [flags]
     \\
     \\Commands:
-    \\  run      Execute a prompt or resume a canonical task.
-    \\  health   Report local runtime configuration and readiness metadata.
-    \\  serve    Start the local workbench HTTP server.
-    \\  tools    Print the built-in tool catalog and tool schemas.
+    \\  run      Execute a prompt or resume a canonical session through the kernel protocol.
+    \\  health   Report local runtime readiness through the kernel protocol.
+    \\  serve    Start the HTTP bridge for /rpc, /events, and compatibility routes.
+    \\  tools    Print the built-in tool catalog and schemas through the kernel protocol.
     \\  help     Print help for a command.
     \\
     \\Examples:
     \\  VAR1 run --prompt "Summarize src/cli.zig."
     \\  VAR1 run --prompt-file .\prompt.txt --json
-    \\  VAR1 run --task-id task-1234567890abcdef
+    \\  VAR1 run --session-id task-1776778021956-42e781c4c8b4efb8
     \\  VAR1 health
     \\  VAR1 serve --host 127.0.0.1 --port 4310
     \\  VAR1 tools --json
@@ -105,24 +109,24 @@ pub const run_help_text =
     \\Usage:
     \\  VAR1 run --prompt <text> [--json] [--no-agent-tools]
     \\  VAR1 run --prompt-file <path> [--json] [--no-agent-tools]
-    \\  VAR1 run --task-id <task-id> [--json] [--no-agent-tools]
+    \\  VAR1 run --session-id <session-id> [--json] [--no-agent-tools]
     \\
     \\Flags:
-    \\  --prompt <text>         Execute an inline prompt.
-    \\  --prompt-file <path>    Read the prompt from a file and trim trailing newlines.
-    \\  --task-id <task-id>     Resume an existing canonical task and reuse its stored prompt.
-    \\  --json                  Emit {"task_id","answer"} instead of plain text.
-    \\  --no-agent-tools        Hide launch_agent, agent_status, wait_agent, and list_agents from the model.
-    \\  -h, --help              Print help for the run command.
+    \\  --prompt <text>           Execute an inline prompt as a new session.
+    \\  --prompt-file <path>      Read the prompt from a file and trim trailing newlines.
+    \\  --session-id <session-id> Resume an existing canonical session and reuse its stored prompt.
+    \\  --json                    Emit {"session_id","output"} instead of plain text.
+    \\  --no-agent-tools          Hide launch_agent, agent_status, wait_agent, and list_agents from the model.
+    \\  -h, --help                Print help for the run command.
     \\
     \\Rules:
-    \\  Exactly one prompt source is allowed: --prompt, --prompt-file, or --task-id.
-    \\  When --task-id is provided, VAR1 resumes the stored task prompt and does not accept a new prompt source.
+    \\  Exactly one prompt source is allowed: --prompt, --prompt-file, or --session-id.
+    \\  When --session-id is provided, VAR1 resumes the stored session prompt and does not accept a new prompt source.
     \\
     \\Examples:
     \\  VAR1 run --prompt "List the files under src."
     \\  VAR1 run --prompt-file .\delegated-prompt.txt --json
-    \\  VAR1 run --task-id task-1776778021956-42e781c4c8b4efb8
+    \\  VAR1 run --session-id task-1776778021956-42e781c4c8b4efb8
     \\
 ;
 
@@ -131,11 +135,11 @@ pub const health_help_text =
     \\  VAR1 health [--json]
     \\
     \\Flags:
-    \\  --json                  Emit {"ok","model","workspace_root","openai_base_url"} instead of plain text.
-    \\  -h, --help              Print help for the health command.
+    \\  --json                    Emit {"ok","model","workspace_root","openai_base_url","auth_provider"} instead of plain text.
+    \\  -h, --help                Print help for the health command.
     \\
     \\Behavior:
-    \\  health reports the loaded local runtime configuration without sending a model request.
+    \\  health is a thin protocol-backed readiness check and does not send a model completion request.
     \\
     \\Examples:
     \\  VAR1 health
@@ -148,20 +152,21 @@ pub const serve_help_text =
     \\  VAR1 serve [--host <host>] [--port <port>]
     \\
     \\Flags:
-    \\  --host <host>           Bind address for the local workbench HTTP server. Default: 127.0.0.1
-    \\  --port <port>           Bind port for the local workbench HTTP server. Default: 4310
-    \\  -h, --help              Print help for the serve command.
+    \\  --host <host>             Bind address for the local bridge. Default: 127.0.0.1
+    \\  --port <port>             Bind port for the local bridge. Default: 4310
+    \\  -h, --help                Print help for the serve command.
     \\
     \\Routes:
-    \\  GET  /                      Embedded workbench HTML
-    \\  GET  /api/health            Active model and workspace root
-    \\  GET  /api/tasks             Canonical task list
-    \\  POST /api/tasks             Create and launch a canonical task
-    \\  GET  /api/tasks/:id         Canonical task detail
-    \\  GET  /api/tasks/:id/turns   Canonical transcript turns for the task id
-    \\  GET  /api/tasks/:id/journal Canonical journal history
-    \\  POST /api/tasks/:id/messages Append a new user message onto the same completed task id
-    \\  POST /api/tasks/:id/resume  Resume the same task id when it is not running
+    \\  POST /rpc                 JSON-RPC bridge to the hidden kernel stdio host
+    \\  GET  /events              Server-sent events for session notifications
+    \\  GET  /api/health          Thin readiness alias for scripts and operators
+    \\  GET  /api/tasks           One-wave compatibility session list facade
+    \\  POST /api/tasks           One-wave compatibility create-and-run facade
+    \\  GET  /api/tasks/:id       One-wave compatibility session detail facade
+    \\  GET  /api/tasks/:id/turns One-wave compatibility message transcript facade
+    \\  GET  /api/tasks/:id/journal One-wave compatibility event history facade
+    \\  POST /api/tasks/:id/messages One-wave compatibility same-session follow-up facade
+    \\  POST /api/tasks/:id/resume One-wave compatibility resume facade
     \\
     \\Example:
     \\  VAR1 serve --host 127.0.0.1 --port 4310
@@ -173,8 +178,8 @@ pub const tools_help_text =
     \\  VAR1 tools [--json]
     \\
     \\Flags:
-    \\  --json                  Emit machine-readable tool contracts for the current default catalog.
-    \\  -h, --help              Print help for the tools command.
+    \\  --json                    Emit machine-readable tool contracts for the current default catalog.
+    \\  -h, --help                Print help for the tools command.
     \\
     \\JSON output shape:
     \\  {
@@ -218,10 +223,6 @@ pub fn main(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void 
             if (iter.next() != null) {
                 try printInvalidArguments("help", root_help_text);
                 return error.InvalidArgs;
-            }
-            if (isHelpFlag(topic)) {
-                try writeStdout(root_help_text);
-                return;
             }
 
             const text = helpText(topic) orelse {
@@ -321,59 +322,63 @@ fn executeRunViaKernel(allocator: std.mem.Allocator, run_options: RunCliOptions)
     var client = try stdio_rpc.LocalClient.init(allocator);
     defer client.deinit();
 
-    const initialize_result_json = try client.call(protocol_types.methods.initialize, "{}");
-    defer allocator.free(initialize_result_json);
+    const initialize = try client.call(protocol_types.methods.initialize, "{}");
+    defer initialize.deinit(allocator);
+    const initialize_result = try expectKernelResult(allocator, initialize);
+    defer allocator.free(initialize_result);
 
-    const prompt = if (run_options.task_id == null)
-        try resolvePromptInput(allocator, run_options.prompt, run_options.prompt_file)
-    else
-        null;
-    defer if (prompt) |value| allocator.free(value);
+    const session_id = if (run_options.session_id) |existing_session_id|
+        try allocator.dupe(u8, existing_session_id)
+    else blk: {
+        const prompt = try resolvePromptInput(allocator, run_options.prompt, run_options.prompt_file);
+        defer allocator.free(prompt);
 
-    const create_params = try std.json.stringifyAlloc(allocator, .{
-        .prompt = prompt,
-        .task_id = run_options.task_id,
+        const create_params = try renderJsonAlloc(allocator, .{
+            .prompt = prompt,
+            .enable_agent_tools = run_options.enable_agent_tools,
+        });
+        defer allocator.free(create_params);
+
+        const create_call = try client.call(protocol_types.methods.session_create, create_params);
+        defer create_call.deinit(allocator);
+        const create_result_json = try expectKernelResult(allocator, create_call);
+        defer allocator.free(create_result_json);
+
+        var parsed_create = try std.json.parseFromSlice(ParsedSessionCreateResult, allocator, create_result_json, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed_create.deinit();
+
+        break :blk try allocator.dupe(u8, parsed_create.value.session.session_id);
+    };
+    defer allocator.free(session_id);
+
+    const send_params = try renderJsonAlloc(allocator, .{
+        .session_id = session_id,
         .enable_agent_tools = run_options.enable_agent_tools,
-    }, .{});
-    defer allocator.free(create_params);
-
-    const create_result_json = try client.call(protocol_types.methods.session_create, create_params);
-    defer allocator.free(create_result_json);
-
-    var parsed_create = try std.json.parseFromSlice(ParsedSessionCreateResult, allocator, create_result_json, .{
-        .ignore_unknown_fields = true,
     });
-    defer parsed_create.deinit();
-    _ = parsed_create.value.state;
-
-    const send_params = try std.json.stringifyAlloc(allocator, .{
-        .session_id = parsed_create.value.session_id,
-    }, .{});
     defer allocator.free(send_params);
 
-    const send_result_json = try client.call(protocol_types.methods.session_send, send_params);
+    const send_call = try client.call(protocol_types.methods.session_send, send_params);
+    defer send_call.deinit(allocator);
+    const send_result_json = try expectKernelResult(allocator, send_call);
     defer allocator.free(send_result_json);
 
     var parsed_send = try std.json.parseFromSlice(ParsedSessionSendResult, allocator, send_result_json, .{
         .ignore_unknown_fields = true,
     });
     defer parsed_send.deinit();
-    _ = parsed_send.value.session_id;
-    _ = parsed_send.value.state;
 
-    const json_payload = try renderRunResultJson(allocator, .{
-        .task_id = parsed_send.value.task_id,
-        .answer = parsed_send.value.answer,
-    });
+    const output = parsed_send.value.session.output orelse "";
+    const json_payload = try renderRunResultJson(allocator, parsed_send.value.session.session_id, output);
     defer allocator.free(json_payload);
 
     if (run_options.json_output) {
         try writeStdout(json_payload);
-        try writeStdout("\n");
         return;
     }
 
-    try writeStdout(parsed_send.value.answer);
+    try writeStdout(output);
     try writeStdout("\n");
 }
 
@@ -381,14 +386,15 @@ fn executeHealthViaKernel(allocator: std.mem.Allocator, options: HealthCliOption
     var client = try stdio_rpc.LocalClient.init(allocator);
     defer client.deinit();
 
-    const result_json = try client.call(protocol_types.methods.health_get, "{}");
+    const call = try client.call(protocol_types.methods.health_get, "{}");
+    defer call.deinit(allocator);
+    const result_json = try expectKernelResult(allocator, call);
     defer allocator.free(result_json);
 
     var parsed = try std.json.parseFromSlice(ParsedHealthResult, allocator, result_json, .{
         .ignore_unknown_fields = true,
     });
     defer parsed.deinit();
-    _ = parsed.value.ok;
 
     if (options.json_output) {
         const json_payload = try std.fmt.allocPrint(allocator, "{f}\n", .{
@@ -401,11 +407,14 @@ fn executeHealthViaKernel(allocator: std.mem.Allocator, options: HealthCliOption
 
     const text_payload = try std.fmt.allocPrint(
         allocator,
-        "VAR1 health\nstatus: ready\nmodel: {s}\nworkspace_root: {s}\nopenai_base_url: {s}\n",
+        "VAR1 health\nstatus: ready\nmodel: {s}\nworkspace_root: {s}\nopenai_base_url: {s}\nauth_provider: {s}\nsubscription_plan: {s}\nsubscription_status: {s}\n",
         .{
             parsed.value.model,
             parsed.value.workspace_root,
             parsed.value.openai_base_url,
+            parsed.value.auth_provider orelse "unknown",
+            parsed.value.subscription_plan_label orelse "unknown",
+            parsed.value.subscription_status orelse "unknown",
         },
     );
     defer allocator.free(text_payload);
@@ -416,20 +425,20 @@ fn executeToolsViaKernel(allocator: std.mem.Allocator, options: ToolsCliOptions)
     var client = try stdio_rpc.LocalClient.init(allocator);
     defer client.deinit();
 
-    const format = if (options.json_output) "json" else "text";
-    const params_json = try std.json.stringifyAlloc(allocator, .{
-        .format = format,
-    }, .{});
+    const params_json = try renderJsonAlloc(allocator, .{
+        .format = if (options.json_output) "json" else "text",
+    });
     defer allocator.free(params_json);
 
-    const result_json = try client.call(protocol_types.methods.tools_list, params_json);
+    const call = try client.call(protocol_types.methods.tools_list, params_json);
+    defer call.deinit(allocator);
+    const result_json = try expectKernelResult(allocator, call);
     defer allocator.free(result_json);
 
     var parsed = try std.json.parseFromSlice(ParsedToolsListResult, allocator, result_json, .{
         .ignore_unknown_fields = true,
     });
     defer parsed.deinit();
-    _ = parsed.value.format;
 
     try writeStdout(parsed.value.output);
     if (options.json_output) try writeStdout("\n");
@@ -465,17 +474,17 @@ fn parseRunArguments(iter: *std.process.ArgIterator) !ParsedRunArguments {
             prompt_source_count += 1;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--session-id")) {
+            parsed.options.session_id = iter.next() orelse return error.InvalidArgs;
+            prompt_source_count += 1;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--json")) {
             parsed.options.json_output = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--no-agent-tools")) {
             parsed.options.enable_agent_tools = false;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--task-id")) {
-            parsed.options.task_id = iter.next() orelse return error.InvalidArgs;
-            prompt_source_count += 1;
             continue;
         }
         return error.InvalidArgs;
@@ -570,14 +579,33 @@ pub fn resolvePromptInput(
     return allocator.dupe(u8, "");
 }
 
-fn renderRunResultJson(allocator: std.mem.Allocator, result: anytype) ![]u8 {
-    const payload = .{
-        .task_id = result.task_id,
-        .answer = result.answer,
-    };
+fn expectKernelResult(allocator: std.mem.Allocator, call: stdio_rpc.RpcCallResult) ![]u8 {
+    if (call.error_json) |error_json| {
+        const message = try std.fmt.allocPrint(allocator, "kernel rpc error: {s}\n", .{error_json});
+        defer allocator.free(message);
+        try writeStderr(message);
+        return error.RpcRemoteError;
+    }
 
+    return allocator.dupe(u8, call.result_json orelse return error.InvalidRpcResponse);
+}
+
+fn renderRunResultJson(
+    allocator: std.mem.Allocator,
+    session_id: []const u8,
+    output: []const u8,
+) ![]u8 {
     return std.fmt.allocPrint(allocator, "{f}\n", .{
-        std.json.fmt(payload, .{ .whitespace = .indent_2 }),
+        std.json.fmt(.{
+            .session_id = session_id,
+            .output = output,
+        }, .{ .whitespace = .indent_2 }),
+    });
+}
+
+fn renderJsonAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{f}", .{
+        std.json.fmt(value, .{}),
     });
 }
 

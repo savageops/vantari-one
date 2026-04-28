@@ -10,7 +10,7 @@ pub const Error = error{
     CommandFailed,
     CommandTerminated,
     InvalidArguments,
-    MissingParentTask,
+    MissingParentSession,
     PatternNotFound,
     UnknownTool,
 };
@@ -50,70 +50,70 @@ pub const AgentService = struct {
     launchFn: *const fn (
         ctx: ?*anyopaque,
         allocator: std.mem.Allocator,
-        parent_task_id: []const u8,
+        parent_session_id: []const u8,
         prompt: []const u8,
         name: ?[]const u8,
     ) anyerror![]u8,
     statusFn: *const fn (
         ctx: ?*anyopaque,
         allocator: std.mem.Allocator,
-        parent_task_id: []const u8,
+        parent_session_id: []const u8,
         agent_name: []const u8,
     ) anyerror![]u8,
     waitFn: *const fn (
         ctx: ?*anyopaque,
         allocator: std.mem.Allocator,
-        parent_task_id: []const u8,
+        parent_session_id: []const u8,
         agent_name: []const u8,
         timeout_ms: usize,
     ) anyerror![]u8,
     listFn: *const fn (
         ctx: ?*anyopaque,
         allocator: std.mem.Allocator,
-        parent_task_id: []const u8,
+        parent_session_id: []const u8,
     ) anyerror![]u8,
 
     pub fn launch(
         self: AgentService,
         allocator: std.mem.Allocator,
-        parent_task_id: []const u8,
+        parent_session_id: []const u8,
         prompt: []const u8,
         name: ?[]const u8,
     ) anyerror![]u8 {
-        return self.launchFn(self.context, allocator, parent_task_id, prompt, name);
+        return self.launchFn(self.context, allocator, parent_session_id, prompt, name);
     }
 
     pub fn status(
         self: AgentService,
         allocator: std.mem.Allocator,
-        parent_task_id: []const u8,
+        parent_session_id: []const u8,
         agent_name: []const u8,
     ) anyerror![]u8 {
-        return self.statusFn(self.context, allocator, parent_task_id, agent_name);
+        return self.statusFn(self.context, allocator, parent_session_id, agent_name);
     }
 
     pub fn wait(
         self: AgentService,
         allocator: std.mem.Allocator,
-        parent_task_id: []const u8,
+        parent_session_id: []const u8,
         agent_name: []const u8,
         timeout_ms: usize,
     ) anyerror![]u8 {
-        return self.waitFn(self.context, allocator, parent_task_id, agent_name, timeout_ms);
+        return self.waitFn(self.context, allocator, parent_session_id, agent_name, timeout_ms);
     }
 
     pub fn list(
         self: AgentService,
         allocator: std.mem.Allocator,
-        parent_task_id: []const u8,
+        parent_session_id: []const u8,
     ) anyerror![]u8 {
-        return self.listFn(self.context, allocator, parent_task_id);
+        return self.listFn(self.context, allocator, parent_session_id);
     }
 };
 
 pub const ExecutionContext = struct {
     workspace_root: []const u8,
-    parent_task_id: ?[]const u8 = null,
+    parent_session_id: ?[]const u8 = null,
     agent_service: ?AgentService = null,
     harness_tools_enabled: bool = false,
 };
@@ -340,7 +340,7 @@ pub fn builtinDefinitions(include_agent_tools: bool) []const types.ToolDefinitio
 }
 
 pub fn builtinDefinitionsForContext(execution_context: ExecutionContext) []const types.ToolDefinition {
-    if (execution_context.var_tools_enabled) {
+    if (execution_context.harness_tools_enabled) {
         return if (execution_context.agent_service != null) all_tool_definitions[0..] else file_plus_harness_tool_definitions[0..];
     }
 
@@ -412,7 +412,7 @@ pub fn renderCatalogJson(allocator: std.mem.Allocator, execution_context: Execut
 pub fn buildAgentSystemPrompt(allocator: std.mem.Allocator, execution_context: ExecutionContext) ![]u8 {
     const catalog = try renderCatalog(allocator, execution_context);
     defer allocator.free(catalog);
-    const harness_note = if (execution_context.var_tools_enabled)
+    const harness_note = if (execution_context.harness_tools_enabled)
         "Harness tools are enabled because this task is explicitly harness-related. Use init_harness only when the canonical structure is missing or incomplete. Do not call harness_todo just to track the current run. If you call harness_task with action:\"upsert\", provide task_name, status, and objective. If you call harness_todo with action:\"upsert\", provide category, task_name, status, and objective."
     else
         "Harness tools are not in the current catalog because this task is not explicitly harness-related. For normal coding work, use file tools and agent tools only, and do not invent extra harness bookkeeping.";
@@ -606,7 +606,7 @@ fn executeLaunchAgent(
     arguments_json: []const u8,
 ) ![]u8 {
     const service = execution_context.agent_service orelse return Error.AgentServiceUnavailable;
-    const parent_task_id = execution_context.parent_task_id orelse return Error.MissingParentTask;
+    const parent_session_id = execution_context.parent_session_id orelse return Error.MissingParentSession;
 
     const Args = struct {
         prompt: []const u8,
@@ -620,7 +620,7 @@ fn executeLaunchAgent(
 
     const content = try service.launch(
         allocator,
-        parent_task_id,
+        parent_session_id,
         parsed.value.prompt,
         parsed.value.name,
     );
@@ -635,7 +635,7 @@ fn executeAgentStatus(
     arguments_json: []const u8,
 ) ![]u8 {
     const service = execution_context.agent_service orelse return Error.AgentServiceUnavailable;
-    const parent_task_id = execution_context.parent_task_id orelse return Error.MissingParentTask;
+    const parent_session_id = execution_context.parent_session_id orelse return Error.MissingParentSession;
 
     const Args = struct {
         name: []const u8,
@@ -646,7 +646,7 @@ fn executeAgentStatus(
     });
     defer parsed.deinit();
 
-    const content = try service.status(allocator, parent_task_id, parsed.value.name);
+    const content = try service.status(allocator, parent_session_id, parsed.value.name);
     defer allocator.free(content);
 
     return okEnvelope(allocator, "agent_status", content);
@@ -658,7 +658,7 @@ fn executeWaitAgent(
     arguments_json: []const u8,
 ) ![]u8 {
     const service = execution_context.agent_service orelse return Error.AgentServiceUnavailable;
-    const parent_task_id = execution_context.parent_task_id orelse return Error.MissingParentTask;
+    const parent_session_id = execution_context.parent_session_id orelse return Error.MissingParentSession;
 
     const Args = struct {
         name: []const u8,
@@ -672,7 +672,7 @@ fn executeWaitAgent(
 
     const content = try service.wait(
         allocator,
-        parent_task_id,
+        parent_session_id,
         parsed.value.name,
         parsed.value.timeout_ms,
     );
@@ -686,9 +686,9 @@ fn executeListAgents(
     execution_context: ExecutionContext,
 ) ![]u8 {
     const service = execution_context.agent_service orelse return Error.AgentServiceUnavailable;
-    const parent_task_id = execution_context.parent_task_id orelse return Error.MissingParentTask;
+    const parent_session_id = execution_context.parent_session_id orelse return Error.MissingParentSession;
 
-    const content = try service.list(allocator, parent_task_id);
+    const content = try service.list(allocator, parent_session_id);
     defer allocator.free(content);
 
     return okEnvelope(allocator, "list_agents", content);

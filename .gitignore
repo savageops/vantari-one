@@ -1,3 +1,14 @@
+# Local environment and secrets
+**/.env
+**/.env.local
+**/.env.*.local
+
+# Zig toolchains and build outputs
+**/.toolchain/
+**/.zig-cache/
+**/zig-out/
+**/output/
+
 # Logs
 logs
 *.log
@@ -72,13 +83,6 @@ web_modules/
 # Yarn Integrity file
 .yarn-integrity
 
-# dotenv environment variable files
-.env
-.env.development.local
-.env.test.local
-.env.production.local
-.env.local
-
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache
@@ -134,15 +138,16 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
-/apps/backend/variant-1/.toolchain
-/apps/backend/variant-1/.var
-/.docs
+
+# Local runtime, research, and operator state
+**/.docs/
+**/.refs/
 /.var
 /.untrack
-/.refs
+/apps/backend/variant-1/.toolchain
+/apps/backend/variant-1/.var
 /apps/backend/variant-1/playground
-/apps/backend/variant-1/scripts
-/apps/backend/variant-1/tests
 /apps/backend/variant-1/src/ui
-/apps/backend/variant-1/.docs
-apps/backend/variant-1/README.md
+
+# Browser automation scratch
+**/.playwright-cli/

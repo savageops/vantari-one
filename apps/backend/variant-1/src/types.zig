@@ -1,11 +1,12 @@
 const std = @import("std");
 
-// TODO: Expand these types only when the runtime gains a new durable surface.
-
 pub const Config = struct {
     openai_base_url: []u8,
     openai_api_key: []u8,
     openai_model: []u8,
+    auth_provider: ?[]u8 = null,
+    subscription_plan_label: ?[]u8 = null,
+    subscription_status: ?[]u8 = null,
     harness_max_steps: usize,
     workspace_root: []u8,
 
@@ -13,32 +14,49 @@ pub const Config = struct {
         allocator.free(self.openai_base_url);
         allocator.free(self.openai_api_key);
         allocator.free(self.openai_model);
+        if (self.auth_provider) |value| allocator.free(value);
+        if (self.subscription_plan_label) |value| allocator.free(value);
+        if (self.subscription_status) |value| allocator.free(value);
         allocator.free(self.workspace_root);
     }
 };
 
-pub const TaskStatus = enum {
-    pending,
+pub const AuthType = enum {
+    api_key,
+    oauth,
+};
+
+pub const SubscriptionSource = enum {
+    manual,
+    provider,
+    inferred,
+};
+
+pub const SessionStatus = enum {
+    initialized,
     running,
     completed,
     failed,
+    cancelled,
 };
 
-pub const TaskRecord = struct {
+pub const SessionRecord = struct {
     id: []u8,
     prompt: []u8,
-    status: TaskStatus,
-    parent_task_id: ?[]u8 = null,
+    status: SessionStatus,
+    parent_session_id: ?[]u8 = null,
+    continued_from_session_id: ?[]u8 = null,
     display_name: ?[]u8 = null,
     agent_profile: ?[]u8 = null,
     failure_reason: ?[]u8 = null,
     created_at_ms: i64,
     updated_at_ms: i64,
 
-    pub fn deinit(self: TaskRecord, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: SessionRecord, allocator: std.mem.Allocator) void {
         allocator.free(self.id);
         allocator.free(self.prompt);
-        if (self.parent_task_id) |value| allocator.free(value);
+        if (self.parent_session_id) |value| allocator.free(value);
+        if (self.continued_from_session_id) |value| allocator.free(value);
         if (self.display_name) |value| allocator.free(value);
         if (self.agent_profile) |value| allocator.free(value);
         if (self.failure_reason) |value| allocator.free(value);
@@ -46,30 +64,30 @@ pub const TaskRecord = struct {
 };
 
 pub const ProgressSnapshot = struct {
-    task_id: []const u8,
+    session_id: []const u8,
     status: []const u8,
     prompt: []const u8,
-    answer: []const u8,
+    output: []const u8,
     updated_at_ms: i64,
 };
 
-pub const JournalEvent = struct {
+pub const SessionEvent = struct {
     event_type: []const u8,
     message: []const u8,
     timestamp_ms: i64,
 
-    pub fn deinit(self: JournalEvent, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: SessionEvent, allocator: std.mem.Allocator) void {
         allocator.free(self.event_type);
         allocator.free(self.message);
     }
 };
 
-pub fn deinitTaskRecords(allocator: std.mem.Allocator, tasks: []TaskRecord) void {
-    for (tasks) |task| task.deinit(allocator);
-    allocator.free(tasks);
+pub fn deinitSessionRecords(allocator: std.mem.Allocator, sessions: []SessionRecord) void {
+    for (sessions) |session| session.deinit(allocator);
+    allocator.free(sessions);
 }
 
-pub fn deinitJournalEvents(allocator: std.mem.Allocator, events: []JournalEvent) void {
+pub fn deinitSessionEvents(allocator: std.mem.Allocator, events: []SessionEvent) void {
     for (events) |event| event.deinit(allocator);
     allocator.free(events);
 }
@@ -81,24 +99,52 @@ pub const MessageRole = enum {
     tool,
 };
 
-pub const ConversationTurnRole = enum {
+pub const SessionMessageRole = enum {
     user,
     assistant,
 };
 
-pub const ConversationTurn = struct {
-    role: ConversationTurnRole,
+pub const SessionMessage = struct {
+    id: []u8,
+    seq: u64,
+    role: SessionMessageRole,
     content: []u8,
     timestamp_ms: i64,
 
-    pub fn deinit(self: ConversationTurn, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: SessionMessage, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
         allocator.free(self.content);
     }
 };
 
-pub fn deinitConversationTurns(allocator: std.mem.Allocator, turns: []ConversationTurn) void {
-    for (turns) |turn| turn.deinit(allocator);
-    allocator.free(turns);
+pub fn deinitSessionMessages(allocator: std.mem.Allocator, messages: []SessionMessage) void {
+    for (messages) |message| message.deinit(allocator);
+    allocator.free(messages);
+}
+
+pub const ContextCheckpoint = struct {
+    id: []u8,
+    entry_type: []u8,
+    created_at_ms: i64,
+    source_seq_start: u64,
+    source_seq_end: u64,
+    first_kept_seq: u64,
+    tokens_before_estimate: u64,
+    tokens_after_estimate: u64,
+    trigger: []u8,
+    summary: []u8,
+
+    pub fn deinit(self: ContextCheckpoint, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.entry_type);
+        allocator.free(self.trigger);
+        allocator.free(self.summary);
+    }
+};
+
+pub fn deinitContextCheckpoints(allocator: std.mem.Allocator, checkpoints: []ContextCheckpoint) void {
+    for (checkpoints) |checkpoint| checkpoint.deinit(allocator);
+    allocator.free(checkpoints);
 }
 
 pub const ToolDefinition = struct {
@@ -157,30 +203,33 @@ pub const CompletionResponse = struct {
     }
 };
 
-pub const RunResult = struct {
-    task_id: []u8,
-    answer: []u8,
+pub const SessionRunResult = struct {
+    session_id: []u8,
+    output: []u8,
 
-    pub fn deinit(self: RunResult, allocator: std.mem.Allocator) void {
-        allocator.free(self.task_id);
-        allocator.free(self.answer);
+    pub fn deinit(self: SessionRunResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.session_id);
+        allocator.free(self.output);
     }
 };
 
-pub fn statusLabel(status: TaskStatus) []const u8 {
+pub fn statusLabel(status: SessionStatus) []const u8 {
     return switch (status) {
-        .pending => "pending",
+        .initialized => "initialized",
         .running => "running",
         .completed => "completed",
         .failed => "failed",
+        .cancelled => "cancelled",
     };
 }
 
-pub fn parseStatusLabel(label: []const u8) !TaskStatus {
-    if (std.mem.eql(u8, label, "pending")) return .pending;
+pub fn parseStatusLabel(label: []const u8) !SessionStatus {
+    if (std.mem.eql(u8, label, "initialized")) return .initialized;
+    if (std.mem.eql(u8, label, "pending")) return .initialized;
     if (std.mem.eql(u8, label, "running")) return .running;
     if (std.mem.eql(u8, label, "completed")) return .completed;
     if (std.mem.eql(u8, label, "failed")) return .failed;
+    if (std.mem.eql(u8, label, "cancelled")) return .cancelled;
     return error.InvalidStatus;
 }
 
@@ -193,17 +242,17 @@ pub fn roleLabel(role: MessageRole) []const u8 {
     };
 }
 
-pub fn conversationTurnRoleLabel(role: ConversationTurnRole) []const u8 {
+pub fn sessionMessageRoleLabel(role: SessionMessageRole) []const u8 {
     return switch (role) {
         .user => "user",
         .assistant => "assistant",
     };
 }
 
-pub fn parseConversationTurnRole(label: []const u8) !ConversationTurnRole {
+pub fn parseSessionMessageRole(label: []const u8) !SessionMessageRole {
     if (std.mem.eql(u8, label, "user")) return .user;
     if (std.mem.eql(u8, label, "assistant")) return .assistant;
-    return error.InvalidConversationTurnRole;
+    return error.InvalidSessionMessageRole;
 }
 
 pub fn initTextMessage(
@@ -256,16 +305,4 @@ pub fn cloneToolCalls(allocator: std.mem.Allocator, tool_calls: []const ToolCall
     }
 
     return owned_calls;
-}
-
-test "status labels stay stable" {
-    try std.testing.expectEqualStrings("completed", statusLabel(.completed));
-}
-
-test "status labels round-trip" {
-    try std.testing.expectEqual(TaskStatus.running, try parseStatusLabel("running"));
-}
-
-test "role labels stay stable" {
-    try std.testing.expectEqualStrings("tool", roleLabel(.tool));
 }

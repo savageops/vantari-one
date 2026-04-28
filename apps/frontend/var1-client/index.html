@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VAR1 Session Client</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">VANTARI ONE / VAR1</p>
+          <h1>External Session Client</h1>
+          <p class="lede">
+            A framework-free browser client over the canonical bridge: `POST /rpc`,
+            `GET /events`, and `GET /api/health`.
+          </p>
+        </div>
+        <div class="status-cluster">
+          <div class="status-card">
+            <span class="status-label">Bridge</span>
+            <span id="bridge-status" class="status-pill status-idle">Disconnected</span>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Model</span>
+            <strong id="health-model">-</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Workspace</span>
+            <strong id="health-root">-</strong>
+          </div>
+        </div>
+      </header>
+
+      <section class="control-bar card">
+        <label class="field bridge-field">
+          <span>Bridge URL</span>
+          <input id="bridge-origin" type="url" spellcheck="false" />
+        </label>
+        <button id="connect-button" type="button" class="primary-button">Connect</button>
+        <button id="refresh-button" type="button" class="secondary-button">Refresh</button>
+      </section>
+
+      <main class="workspace">
+        <aside class="sidebar card">
+          <div class="section-header">
+            <div>
+              <p class="section-kicker">Sessions</p>
+              <h2>Canonical Runtime</h2>
+            </div>
+            <span id="session-count" class="badge">0</span>
+          </div>
+          <div id="session-list" class="session-list"></div>
+        </aside>
+
+        <section class="main-column">
+          <section class="card compose-card">
+            <div class="section-header">
+              <div>
+                <p class="section-kicker">Create</p>
+                <h2>Start A Session</h2>
+              </div>
+            </div>
+            <form id="create-form" class="stack">
+              <label class="field">
+                <span>Prompt</span>
+                <textarea
+                  id="create-prompt"
+                  rows="4"
+                  placeholder="Count the lowercase letter r in strawberry."
+                ></textarea>
+              </label>
+              <div class="action-row">
+                <button type="submit" class="primary-button">Create And Run</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="card detail-card">
+            <div class="section-header">
+              <div>
+                <p class="section-kicker">Selected Session</p>
+                <h2 id="detail-title">Nothing selected</h2>
+              </div>
+              <div class="detail-actions">
+                <button id="resume-button" type="button" class="secondary-button" disabled>Resume</button>
+                <button id="copy-output-button" type="button" class="secondary-button" disabled>Copy Output</button>
+              </div>
+            </div>
+
+            <div id="detail-empty" class="empty-state">
+              Connect to a bridge and select a session to inspect messages, events, and output.
+            </div>
+
+            <div id="detail-content" class="detail-content hidden">
+              <div class="detail-grid">
+                <article class="metric-panel">
+                  <span class="metric-label">Status</span>
+                  <strong id="detail-status">-</strong>
+                </article>
+                <article class="metric-panel">
+                  <span class="metric-label">Updated</span>
+                  <strong id="detail-updated">-</strong>
+                </article>
+                <article class="metric-panel wide">
+                  <span class="metric-label">Prompt</span>
+                  <strong id="detail-prompt">-</strong>
+                </article>
+              </div>
+
+              <div class="detail-panels">
+                <article class="panel">
+                  <div class="panel-header">
+                    <h3>Output</h3>
+                  </div>
+                  <pre id="detail-output" class="code-block"></pre>
+                </article>
+
+                <article class="panel">
+                  <div class="panel-header">
+                    <h3>Messages</h3>
+                  </div>
+                  <div id="message-timeline" class="timeline"></div>
+                </article>
+
+                <article class="panel">
+                  <div class="panel-header">
+                    <h3>Events</h3>
+                  </div>
+                  <div id="event-timeline" class="timeline"></div>
+                </article>
+              </div>
+
+              <form id="followup-form" class="stack followup-form">
+                <label class="field">
+                  <span>Follow-up prompt</span>
+                  <textarea
+                    id="followup-prompt"
+                    rows="3"
+                    placeholder="Tell me more."
+                  ></textarea>
+                </label>
+                <div class="action-row">
+                  <button type="submit" class="primary-button">Send Follow-up</button>
+                </div>
+              </form>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

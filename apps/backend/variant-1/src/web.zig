@@ -1,15 +1,13 @@
 const std = @import("std");
-const agents = @import("agents.zig");
-const docs_sync = @import("docs_sync.zig");
-const loop = @import("loop.zig");
+const protocol_types = @import("protocol_types.zig");
 const provider = @import("provider.zig");
-const store = @import("store.zig");
+const stdio_rpc = @import("stdio_rpc.zig");
 const types = @import("types.zig");
 
-const workbench_html = @embedFile("ui/index.html");
-const max_request_body_bytes = 64 * 1024;
+const max_request_body_bytes = 256 * 1024;
 const connection_read_buffer_size = 16 * 1024;
 const connection_write_buffer_size = 16 * 1024;
+const sse_poll_timeout_ms: usize = 1000;
 
 pub const ServeOptions = struct {
     host: []const u8 = "127.0.0.1",
@@ -17,9 +15,83 @@ pub const ServeOptions = struct {
     transport: provider.Transport,
 };
 
-const App = struct {
-    config: *const types.Config,
-    transport: provider.Transport,
+pub const KernelBridge = struct {
+    context: ?*anyopaque,
+    callFn: *const fn (
+        ctx: ?*anyopaque,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        params_json: []const u8,
+    ) anyerror!stdio_rpc.RpcCallResult,
+    waitNotificationAfterFn: *const fn (
+        ctx: ?*anyopaque,
+        allocator: std.mem.Allocator,
+        after_sequence: u64,
+        timeout_ms: usize,
+    ) anyerror!?stdio_rpc.Notification,
+    deinitFn: ?*const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator) void = null,
+
+    pub fn call(
+        self: KernelBridge,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        params_json: []const u8,
+    ) anyerror!stdio_rpc.RpcCallResult {
+        return self.callFn(self.context, allocator, method, params_json);
+    }
+
+    pub fn waitNotificationAfter(
+        self: KernelBridge,
+        allocator: std.mem.Allocator,
+        after_sequence: u64,
+        timeout_ms: usize,
+    ) anyerror!?stdio_rpc.Notification {
+        return self.waitNotificationAfterFn(self.context, allocator, after_sequence, timeout_ms);
+    }
+
+    pub fn deinit(self: KernelBridge, allocator: std.mem.Allocator) void {
+        if (self.deinitFn) |deinit_fn| deinit_fn(self.context, allocator);
+    }
+};
+
+pub const Bridge = struct {
+    allocator: std.mem.Allocator,
+    kernel: KernelBridge,
+
+    pub fn initLocal(allocator: std.mem.Allocator) !Bridge {
+        const client = try allocator.create(stdio_rpc.LocalClient);
+        errdefer allocator.destroy(client);
+        client.* = try stdio_rpc.LocalClient.init(allocator);
+        errdefer client.deinit();
+
+        var bridge = Bridge{
+            .allocator = allocator,
+            .kernel = .{
+                .context = client,
+                .callFn = localKernelCall,
+                .waitNotificationAfterFn = localKernelWaitNotificationAfter,
+                .deinitFn = localKernelDeinit,
+            },
+        };
+
+        const subscribe_call = try bridge.kernel.call(allocator, protocol_types.methods.events_subscribe, "{}");
+        defer subscribe_call.deinit(allocator);
+        const subscribe_result = try expectKernelResult(allocator, subscribe_call);
+        defer allocator.free(subscribe_result);
+
+        return bridge;
+    }
+
+    pub fn initWithKernel(allocator: std.mem.Allocator, kernel: KernelBridge) Bridge {
+        return .{
+            .allocator = allocator,
+            .kernel = kernel,
+        };
+    }
+
+    pub fn deinit(self: *Bridge) void {
+        self.kernel.deinit(self.allocator);
+    }
 };
 
 const Response = struct {
@@ -34,70 +106,49 @@ const Response = struct {
 
 const CreateTaskRequest = struct {
     prompt: []const u8,
-    continue_from_task_id: ?[]const u8 = null,
 };
 
 const TaskMessageRequest = struct {
     prompt: []const u8,
 };
 
-const BackgroundRun = struct {
-    config: types.Config,
-    task_id: []u8,
-    transport: provider.Transport,
-
-    fn deinit(self: *BackgroundRun) void {
-        const allocator = std.heap.page_allocator;
-        self.config.deinit(allocator);
-        allocator.free(self.task_id);
-        allocator.destroy(self);
-    }
-};
-
-pub fn serve(allocator: std.mem.Allocator, config: types.Config, options: ServeOptions) !void {
+pub fn serve(allocator: std.mem.Allocator, _: types.Config, options: ServeOptions) !void {
     const address = try std.net.Address.parseIp(options.host, options.port);
     var listener = try address.listen(.{ .reuse_address = true });
     defer listener.deinit();
 
-    const app = App{
-        .config = &config,
-        .transport = options.transport,
-    };
+    var bridge = try Bridge.initLocal(allocator);
+    defer bridge.deinit();
 
     var stdout_buffer: [256]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     try stdout_writer.interface.print(
-        "VAR1 workbench listening on http://{s}:{d}\n",
+        "VAR1 bridge listening on http://{s}:{d}\n",
         .{ options.host, options.port },
     );
     try stdout_writer.interface.flush();
 
     while (true) {
         var connection = try listener.accept();
-        handleConnection(allocator, &app, &connection) catch |err| {
-            logRuntimeError("http_connection", null, err);
+        handleConnection(allocator, &bridge, &connection) catch |err| {
+            logBridgeError("http_connection", null, err);
         };
     }
 }
 
 pub fn route(
     allocator: std.mem.Allocator,
-    config: *const types.Config,
-    transport: provider.Transport,
+    bridge: *Bridge,
     method: std.http.Method,
     target: []const u8,
     body: []const u8,
 ) !Response {
-    const app = App{
-        .config = config,
-        .transport = transport,
-    };
-    return routeApp(allocator, &app, method, target, body);
+    return routeBridge(allocator, bridge, method, target, body);
 }
 
 fn handleConnection(
     allocator: std.mem.Allocator,
-    app: *const App,
+    bridge: *Bridge,
     connection: *std.net.Server.Connection,
 ) !void {
     defer connection.stream.close();
@@ -116,9 +167,10 @@ fn handleConnection(
     const body = try readRequestBody(allocator, &request);
     defer allocator.free(body);
 
-    const response = routeApp(allocator, app, request.head.method, target, body) catch |err| {
-        const failure = try jsonErrorResponse(allocator, .internal_server_error, @errorName(err));
+    const response = routeBridge(allocator, bridge, request.head.method, target, body) catch |err| {
+        const failure = try jsonErrorResponse(allocator, .internal_server_error, "InternalServerError");
         defer failure.deinit(allocator);
+        logBridgeError("bridge_route", null, err);
         try respond(&request, failure);
         return;
     };
@@ -127,63 +179,464 @@ fn handleConnection(
     try respond(&request, response);
 }
 
-fn routeApp(
+fn routeBridge(
     allocator: std.mem.Allocator,
-    app: *const App,
+    bridge: *Bridge,
     method: std.http.Method,
     target: []const u8,
     body: []const u8,
 ) !Response {
     const path = requestPath(target);
 
-    if (method == .GET and std.mem.eql(u8, path, "/")) {
+    if (method == .OPTIONS) {
         return .{
-            .status = .ok,
-            .content_type = "text/html; charset=utf-8",
-            .body = try allocator.dupe(u8, workbench_html),
+            .status = .no_content,
+            .content_type = "text/plain; charset=utf-8",
+            .body = try allocator.dupe(u8, ""),
         };
     }
 
+    if (method == .GET and std.mem.eql(u8, path, "/")) {
+        return .{
+            .status = .ok,
+            .content_type = "text/plain; charset=utf-8",
+            .body = try allocator.dupe(u8, "VAR1 HTTP bridge ready. Use POST /rpc, GET /events, or the external client in apps/frontend/var1-client.\n"),
+        };
+    }
+
+    if (method == .POST and std.mem.eql(u8, path, "/rpc")) {
+        return forwardRpcRequest(allocator, bridge, body);
+    }
+
+    if (method == .GET and std.mem.eql(u8, path, "/events")) {
+        return renderEventSnapshotResponse(allocator, bridge, target);
+    }
+
     if (method == .GET and std.mem.eql(u8, path, "/api/health")) {
-        return jsonSuccess(allocator, .ok, .{
-            .ok = true,
-            .model = app.config.openai_model,
-            .workspace_root = app.config.workspace_root,
-        });
+        const result_json = try callKernelResult(allocator, bridge, protocol_types.methods.health_get, "{}");
+        defer allocator.free(result_json);
+        return jsonResponse(allocator, .ok, result_json);
     }
 
     if (std.mem.eql(u8, path, "/api/tasks")) {
-        if (method == .GET) return renderTaskListResponse(allocator, app.config.workspace_root);
-        if (method == .POST) return createTaskResponse(allocator, app, body);
+        if (method == .GET) return renderTaskListResponse(allocator, bridge);
+        if (method == .POST) return createTaskResponse(allocator, bridge, body);
         return jsonErrorResponse(allocator, .method_not_allowed, "MethodNotAllowed");
     }
 
     if (std.mem.startsWith(u8, path, "/api/tasks/")) {
         const remainder = path["/api/tasks/".len..];
         var parts = std.mem.splitScalar(u8, remainder, '/');
-        const task_id = parts.next() orelse return jsonErrorResponse(allocator, .not_found, "NotFound");
+        const session_id = parts.next() orelse return jsonErrorResponse(allocator, .not_found, "NotFound");
         const action = parts.next();
         if (parts.next() != null) return jsonErrorResponse(allocator, .not_found, "NotFound");
 
         if (action == null and method == .GET) {
-            return renderTaskDetailResponse(allocator, app.config.workspace_root, task_id);
+            return renderTaskDetailResponse(allocator, bridge, session_id);
         }
         if (action != null and std.mem.eql(u8, action.?, "journal") and method == .GET) {
-            return renderTaskJournalResponse(allocator, app.config.workspace_root, task_id);
+            return renderTaskJournalResponse(allocator, bridge, session_id);
         }
         if (action != null and std.mem.eql(u8, action.?, "turns") and method == .GET) {
-            return renderTaskTurnsResponse(allocator, app.config.workspace_root, task_id);
+            return renderTaskTurnsResponse(allocator, bridge, session_id);
         }
         if (action != null and std.mem.eql(u8, action.?, "messages") and method == .POST) {
-            return appendTaskMessageResponse(allocator, app, task_id, body);
+            return appendTaskMessageResponse(allocator, bridge, session_id, body);
         }
         if (action != null and std.mem.eql(u8, action.?, "resume") and method == .POST) {
-            return resumeTaskResponse(allocator, app, task_id);
+            return resumeTaskResponse(allocator, bridge, session_id);
         }
         return jsonErrorResponse(allocator, .method_not_allowed, "MethodNotAllowed");
     }
 
     return jsonErrorResponse(allocator, .not_found, "NotFound");
+}
+
+fn forwardRpcRequest(allocator: std.mem.Allocator, bridge: *Bridge, body: []const u8) !Response {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch {
+        return jsonErrorResponse(allocator, .bad_request, "InvalidJsonRpc");
+    };
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return jsonErrorResponse(allocator, .bad_request, "InvalidJsonRpc");
+    const object = parsed.value.object;
+
+    const jsonrpc_value = object.get("jsonrpc") orelse return jsonErrorResponse(allocator, .bad_request, "InvalidJsonRpc");
+    if (jsonrpc_value != .string or !std.mem.eql(u8, jsonrpc_value.string, "2.0")) {
+        return jsonErrorResponse(allocator, .bad_request, "InvalidJsonRpc");
+    }
+
+    const method_value = object.get("method") orelse return jsonErrorResponse(allocator, .bad_request, "InvalidJsonRpc");
+    if (method_value != .string) return jsonErrorResponse(allocator, .bad_request, "InvalidJsonRpc");
+
+    const id_json = if (object.get("id")) |id_value|
+        try renderJsonAlloc(allocator, id_value)
+    else
+        try allocator.dupe(u8, "null");
+    defer allocator.free(id_json);
+
+    const params_json = if (object.get("params")) |params_value|
+        try renderJsonAlloc(allocator, params_value)
+    else
+        try allocator.dupe(u8, "{}");
+    defer allocator.free(params_json);
+
+    const call = try bridge.kernel.call(allocator, method_value.string, params_json);
+    defer call.deinit(allocator);
+
+    const body_json = if (call.error_json) |error_json|
+        try std.fmt.allocPrint(
+            allocator,
+            "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"error\":{s}}}",
+            .{ id_json, error_json },
+        )
+    else
+        try std.fmt.allocPrint(
+            allocator,
+            "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":{s}}}",
+            .{ id_json, call.result_json orelse "null" },
+        );
+
+    return .{
+        .status = .ok,
+        .content_type = "application/json; charset=utf-8",
+        .body = body_json,
+    };
+}
+
+fn renderTaskListResponse(allocator: std.mem.Allocator, bridge: *Bridge) !Response {
+    const result_json = try callKernelResult(allocator, bridge, protocol_types.methods.session_list, "{}");
+    defer allocator.free(result_json);
+
+    var parsed = try std.json.parseFromSlice(protocol_types.SessionListResult, allocator, result_json, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    var output = std.array_list.Managed(u8).init(allocator);
+    defer output.deinit();
+    const writer = output.writer();
+
+    try writer.writeAll("{\"ok\":true,\"tasks\":[");
+    for (parsed.value.sessions, 0..) |session, index| {
+        if (index > 0) try writer.writeAll(",");
+
+        const session_get = try readSessionGet(allocator, bridge, session.session_id);
+        defer deinitSessionGetOwned(allocator, session_get);
+        try writeLegacyTaskObject(writer, session_get);
+    }
+    try writer.writeAll("]}");
+
+    return .{
+        .status = .ok,
+        .content_type = "application/json; charset=utf-8",
+        .body = try output.toOwnedSlice(),
+    };
+}
+
+fn createTaskResponse(allocator: std.mem.Allocator, bridge: *Bridge, body: []const u8) !Response {
+    var parsed = std.json.parseFromSlice(CreateTaskRequest, allocator, body, .{
+        .ignore_unknown_fields = true,
+    }) catch return jsonErrorResponse(allocator, .bad_request, "InvalidJson");
+    defer parsed.deinit();
+
+    const prompt = std.mem.trim(u8, parsed.value.prompt, " \t\r\n");
+    if (prompt.len == 0) return jsonErrorResponse(allocator, .bad_request, "MissingPrompt");
+
+    const create_params = try renderJsonAlloc(allocator, .{ .prompt = prompt });
+    defer allocator.free(create_params);
+    const create_json = try callKernelResult(allocator, bridge, protocol_types.methods.session_create, create_params);
+    defer allocator.free(create_json);
+
+    var created = try std.json.parseFromSlice(protocol_types.SessionCreateResult, allocator, create_json, .{
+        .ignore_unknown_fields = true,
+    });
+    defer created.deinit();
+
+    const send_params = try renderJsonAlloc(allocator, .{
+        .session_id = created.value.session.session_id,
+    });
+    defer allocator.free(send_params);
+    const send_json = try callKernelResult(allocator, bridge, protocol_types.methods.session_send, send_params);
+    defer allocator.free(send_json);
+
+    return renderTaskDetailResponseWithStatus(allocator, bridge, created.value.session.session_id, .created);
+}
+
+fn appendTaskMessageResponse(
+    allocator: std.mem.Allocator,
+    bridge: *Bridge,
+    session_id: []const u8,
+    body: []const u8,
+) !Response {
+    var parsed = std.json.parseFromSlice(TaskMessageRequest, allocator, body, .{
+        .ignore_unknown_fields = true,
+    }) catch return jsonErrorResponse(allocator, .bad_request, "InvalidJson");
+    defer parsed.deinit();
+
+    const prompt = std.mem.trim(u8, parsed.value.prompt, " \t\r\n");
+    if (prompt.len == 0) return jsonErrorResponse(allocator, .bad_request, "MissingPrompt");
+
+    const send_params = try renderJsonAlloc(allocator, .{
+        .session_id = session_id,
+        .prompt = prompt,
+    });
+    defer allocator.free(send_params);
+    const send_json = try callKernelResult(allocator, bridge, protocol_types.methods.session_send, send_params);
+    defer allocator.free(send_json);
+
+    return renderTaskDetailResponse(allocator, bridge, session_id);
+}
+
+fn resumeTaskResponse(
+    allocator: std.mem.Allocator,
+    bridge: *Bridge,
+    session_id: []const u8,
+) !Response {
+    const send_params = try renderJsonAlloc(allocator, .{
+        .session_id = session_id,
+    });
+    defer allocator.free(send_params);
+    const send_json = try callKernelResult(allocator, bridge, protocol_types.methods.session_send, send_params);
+    defer allocator.free(send_json);
+
+    return renderTaskDetailResponse(allocator, bridge, session_id);
+}
+
+fn renderTaskDetailResponse(
+    allocator: std.mem.Allocator,
+    bridge: *Bridge,
+    session_id: []const u8,
+) !Response {
+    return renderTaskDetailResponseWithStatus(allocator, bridge, session_id, .ok);
+}
+
+fn renderTaskDetailResponseWithStatus(
+    allocator: std.mem.Allocator,
+    bridge: *Bridge,
+    session_id: []const u8,
+    status: std.http.Status,
+) !Response {
+    const session_get = readSessionGet(allocator, bridge, session_id) catch {
+        return jsonErrorResponse(allocator, .not_found, "UnknownTask");
+    };
+    defer deinitSessionGetOwned(allocator, session_get);
+
+    var output = std.array_list.Managed(u8).init(allocator);
+    defer output.deinit();
+    const writer = output.writer();
+
+    try writer.writeAll("{\"ok\":true,\"task\":");
+    try writeLegacyTaskObject(writer, session_get);
+    try writer.writeAll("}");
+
+    return .{
+        .status = status,
+        .content_type = "application/json; charset=utf-8",
+        .body = try output.toOwnedSlice(),
+    };
+}
+
+fn renderTaskJournalResponse(
+    allocator: std.mem.Allocator,
+    bridge: *Bridge,
+    session_id: []const u8,
+) !Response {
+    const session_get = readSessionGet(allocator, bridge, session_id) catch {
+        return jsonErrorResponse(allocator, .not_found, "UnknownTask");
+    };
+    defer deinitSessionGetOwned(allocator, session_get);
+
+    return jsonSuccess(allocator, .ok, .{
+        .ok = true,
+        .events = session_get.events,
+    });
+}
+
+fn renderTaskTurnsResponse(
+    allocator: std.mem.Allocator,
+    bridge: *Bridge,
+    session_id: []const u8,
+) !Response {
+    const session_get = readSessionGet(allocator, bridge, session_id) catch {
+        return jsonErrorResponse(allocator, .not_found, "UnknownTask");
+    };
+    defer deinitSessionGetOwned(allocator, session_get);
+
+    return jsonSuccess(allocator, .ok, .{
+        .ok = true,
+        .turns = session_get.messages,
+    });
+}
+
+fn renderEventSnapshotResponse(
+    allocator: std.mem.Allocator,
+    bridge: *Bridge,
+    target: []const u8,
+) !Response {
+    const after_sequence = parseSinceQuery(target);
+    const notification = try bridge.kernel.waitNotificationAfter(allocator, after_sequence, sse_poll_timeout_ms);
+    defer if (notification) |value| value.deinit(allocator);
+
+    const body = if (notification) |event|
+        try renderSseEvent(allocator, event)
+    else
+        try allocator.dupe(u8, ": keepalive\n\n");
+
+    return .{
+        .status = .ok,
+        .content_type = "text/event-stream; charset=utf-8",
+        .body = body,
+    };
+}
+
+fn readSessionGet(
+    allocator: std.mem.Allocator,
+    bridge: *Bridge,
+    session_id: []const u8,
+) !protocol_types.SessionGetResult {
+    const params_json = try renderJsonAlloc(allocator, .{
+        .session_id = session_id,
+    });
+    defer allocator.free(params_json);
+
+    const result_json = try callKernelResult(allocator, bridge, protocol_types.methods.session_get, params_json);
+    defer allocator.free(result_json);
+
+    var parsed = try std.json.parseFromSlice(protocol_types.SessionGetResult, allocator, result_json, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    return cloneSessionGet(allocator, parsed.value);
+}
+
+fn deinitSessionGetOwned(allocator: std.mem.Allocator, session_get: protocol_types.SessionGetResult) void {
+    allocator.free(session_get.session.session_id);
+    allocator.free(session_get.session.status);
+    allocator.free(session_get.session.prompt);
+    if (session_get.session.output) |value| allocator.free(value);
+    if (session_get.session.parent_session_id) |value| allocator.free(value);
+    if (session_get.session.continued_from_session_id) |value| allocator.free(value);
+    if (session_get.session.display_name) |value| allocator.free(value);
+    if (session_get.session.agent_profile) |value| allocator.free(value);
+    if (session_get.session.failure_reason) |value| allocator.free(value);
+
+    for (session_get.messages) |message| message.deinit(allocator);
+    allocator.free(session_get.messages);
+
+    for (session_get.events) |event| event.deinit(allocator);
+    allocator.free(session_get.events);
+
+    if (session_get.latest_event) |event| event.deinit(allocator);
+}
+
+fn cloneSessionGet(
+    allocator: std.mem.Allocator,
+    session_get: protocol_types.SessionGetResult,
+) !protocol_types.SessionGetResult {
+    const messages = try cloneSessionMessages(allocator, session_get.messages);
+    errdefer {
+        for (messages) |message| message.deinit(allocator);
+        allocator.free(messages);
+    }
+
+    const events = try cloneSessionEvents(allocator, session_get.events);
+    errdefer {
+        for (events) |event| event.deinit(allocator);
+        allocator.free(events);
+    }
+
+    return .{
+        .session = .{
+            .session_id = try allocator.dupe(u8, session_get.session.session_id),
+            .status = try allocator.dupe(u8, session_get.session.status),
+            .prompt = try allocator.dupe(u8, session_get.session.prompt),
+            .output = if (session_get.session.output) |value| try allocator.dupe(u8, value) else null,
+            .parent_session_id = if (session_get.session.parent_session_id) |value| try allocator.dupe(u8, value) else null,
+            .continued_from_session_id = if (session_get.session.continued_from_session_id) |value| try allocator.dupe(u8, value) else null,
+            .display_name = if (session_get.session.display_name) |value| try allocator.dupe(u8, value) else null,
+            .agent_profile = if (session_get.session.agent_profile) |value| try allocator.dupe(u8, value) else null,
+            .failure_reason = if (session_get.session.failure_reason) |value| try allocator.dupe(u8, value) else null,
+            .created_at_ms = session_get.session.created_at_ms,
+            .updated_at_ms = session_get.session.updated_at_ms,
+        },
+        .latest_event = if (session_get.latest_event) |event| .{
+            .event_type = try allocator.dupe(u8, event.event_type),
+            .message = try allocator.dupe(u8, event.message),
+            .timestamp_ms = event.timestamp_ms,
+        } else null,
+        .messages = messages,
+        .events = events,
+    };
+}
+
+fn cloneSessionMessages(
+    allocator: std.mem.Allocator,
+    messages: []const types.SessionMessage,
+) ![]types.SessionMessage {
+    var owned = try allocator.alloc(types.SessionMessage, messages.len);
+    errdefer allocator.free(owned);
+
+    for (messages, 0..) |message, index| {
+        owned[index] = .{
+            .id = try allocator.dupe(u8, message.id),
+            .seq = message.seq,
+            .role = message.role,
+            .content = try allocator.dupe(u8, message.content),
+            .timestamp_ms = message.timestamp_ms,
+        };
+    }
+
+    return owned;
+}
+
+fn cloneSessionEvents(
+    allocator: std.mem.Allocator,
+    events: []const types.SessionEvent,
+) ![]types.SessionEvent {
+    var owned = try allocator.alloc(types.SessionEvent, events.len);
+    errdefer allocator.free(owned);
+
+    for (events, 0..) |event, index| {
+        owned[index] = .{
+            .event_type = try allocator.dupe(u8, event.event_type),
+            .message = try allocator.dupe(u8, event.message),
+            .timestamp_ms = event.timestamp_ms,
+        };
+    }
+
+    return owned;
+}
+
+fn writeLegacyTaskObject(writer: anytype, session_get: protocol_types.SessionGetResult) !void {
+    try writer.writeAll("{\"id\":");
+    try writeJsonValue(writer, session_get.session.session_id);
+    try writer.writeAll(",\"prompt\":");
+    try writeJsonValue(writer, session_get.session.prompt);
+    try writer.writeAll(",\"status\":");
+    try writeJsonValue(writer, session_get.session.status);
+    try writer.writeAll(",\"parent_task_id\":");
+    try writeOptionalString(writer, session_get.session.parent_session_id);
+    try writer.writeAll(",\"continued_from_task_id\":");
+    try writeOptionalString(writer, session_get.session.continued_from_session_id);
+    try writer.writeAll(",\"display_name\":");
+    try writeOptionalString(writer, session_get.session.display_name);
+    try writer.writeAll(",\"agent_profile\":");
+    try writeOptionalString(writer, session_get.session.agent_profile);
+    try writer.writeAll(",\"failure_reason\":");
+    try writeOptionalString(writer, session_get.session.failure_reason);
+    try writer.print(",\"created_at_ms\":{d}", .{session_get.session.created_at_ms});
+    try writer.print(",\"updated_at_ms\":{d}", .{session_get.session.updated_at_ms});
+    try writer.writeAll(",\"latest_event\":");
+    if (session_get.latest_event) |latest_event| {
+        try writeJsonValue(writer, latest_event);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"answer\":");
+    try writeOptionalString(writer, session_get.session.output);
+    try writer.writeAll("}");
 }
 
 fn readRequestBody(allocator: std.mem.Allocator, request: *std.http.Server.Request) ![]u8 {
@@ -198,6 +651,9 @@ fn respond(request: *std.http.Server.Request, response: Response) !void {
     const headers = [_]std.http.Header{
         .{ .name = "content-type", .value = response.content_type },
         .{ .name = "cache-control", .value = "no-store" },
+        .{ .name = "access-control-allow-origin", .value = "*" },
+        .{ .name = "access-control-allow-headers", .value = "content-type,last-event-id" },
+        .{ .name = "access-control-allow-methods", .value = "GET,POST,OPTIONS" },
         .{ .name = "x-content-type-options", .value = "nosniff" },
     };
 
@@ -212,334 +668,38 @@ fn requestPath(target: []const u8) []const u8 {
     return target[0..query_index];
 }
 
-fn createTaskResponse(
-    allocator: std.mem.Allocator,
-    app: *const App,
-    body: []const u8,
-) !Response {
-    var parsed = std.json.parseFromSlice(CreateTaskRequest, allocator, body, .{
-        .ignore_unknown_fields = true,
-    }) catch return jsonErrorResponse(allocator, .bad_request, "InvalidJson");
-    defer parsed.deinit();
-
-    const prompt = std.mem.trim(u8, parsed.value.prompt, " \t\r\n");
-    if (prompt.len == 0) return jsonErrorResponse(allocator, .bad_request, "MissingPrompt");
-    if (parsed.value.continue_from_task_id != null) {
-        return jsonErrorResponse(allocator, .bad_request, "UseTaskMessagesEndpoint");
+fn parseSinceQuery(target: []const u8) u64 {
+    const query_index = std.mem.indexOfScalar(u8, target, '?') orelse return 0;
+    const query = target[query_index + 1 ..];
+    var parts = std.mem.splitScalar(u8, query, '&');
+    while (parts.next()) |entry| {
+        if (!std.mem.startsWith(u8, entry, "since=")) continue;
+        return std.fmt.parseInt(u64, entry["since=".len..], 10) catch 0;
     }
-
-    try docs_sync.ensureRunStart(allocator, app.config.workspace_root);
-    var task = try store.initTaskWithOptions(allocator, app.config.workspace_root, prompt, .{ .status = .pending });
-    defer task.deinit(allocator);
-
-    try docs_sync.writePending(allocator, app.config.workspace_root, .{
-        .task_id = task.id,
-        .status = types.statusLabel(task.status),
-        .prompt = task.prompt,
-        .answer = "",
-        .updated_at_ms = task.updated_at_ms,
-    });
-    try docs_sync.appendLog(allocator, app.config.workspace_root, "workbench task enqueued");
-
-    try startBackgroundRun(app, task.id);
-    return renderTaskDetailResponseWithStatus(allocator, app.config.workspace_root, task.id, .created);
+    return 0;
 }
 
-fn appendTaskMessageResponse(
-    allocator: std.mem.Allocator,
-    app: *const App,
-    task_id: []const u8,
-    body: []const u8,
-) !Response {
-    var parsed = std.json.parseFromSlice(TaskMessageRequest, allocator, body, .{
-        .ignore_unknown_fields = true,
-    }) catch return jsonErrorResponse(allocator, .bad_request, "InvalidJson");
-    defer parsed.deinit();
-
-    const prompt = std.mem.trim(u8, parsed.value.prompt, " \t\r\n");
-    if (prompt.len == 0) return jsonErrorResponse(allocator, .bad_request, "MissingPrompt");
-
-    try docs_sync.ensureRunStart(allocator, app.config.workspace_root);
-
-    var task = store.readTaskRecord(allocator, app.config.workspace_root, task_id) catch {
-        return jsonErrorResponse(allocator, .not_found, "UnknownTask");
-    };
-    defer task.deinit(allocator);
-
-    if (task.status == .running or task.status == .pending) {
-        return jsonErrorResponse(allocator, .conflict, "TaskNotReadyForMessage");
-    }
-    if (task.status != .completed) {
-        return jsonErrorResponse(allocator, .conflict, "TaskMessageTargetNotCompleted");
-    }
-
-    const answer = try store.readFinalAnswer(allocator, app.config.workspace_root, task.id);
-    defer if (answer) |value| allocator.free(value);
-    if (answer == null) {
-        return jsonErrorResponse(allocator, .conflict, "TaskMessageTargetMissingAnswer");
-    }
-
-    const timestamp_ms = std.time.milliTimestamp();
-    try store.appendConversationTurn(allocator, app.config.workspace_root, task.id, .user, prompt, timestamp_ms);
-    try store.setTaskPrompt(allocator, app.config.workspace_root, &task, prompt, .pending);
-    try docs_sync.writePending(allocator, app.config.workspace_root, .{
-        .task_id = task.id,
-        .status = types.statusLabel(task.status),
-        .prompt = task.prompt,
-        .answer = "",
-        .updated_at_ms = task.updated_at_ms,
-    });
-    try docs_sync.appendLog(allocator, app.config.workspace_root, "workbench task message enqueued");
-
-    try startBackgroundRun(app, task.id);
-    return renderTaskDetailResponse(allocator, app.config.workspace_root, task.id);
+fn renderSseEvent(allocator: std.mem.Allocator, notification: stdio_rpc.Notification) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "id: {d}\nevent: {s}\ndata: {s}\n\n",
+        .{ notification.sequence, notification.method, notification.params_json },
+    );
 }
 
-fn resumeTaskResponse(
-    allocator: std.mem.Allocator,
-    app: *const App,
-    task_id: []const u8,
-) !Response {
-    try docs_sync.ensureRunStart(allocator, app.config.workspace_root);
-
-    var task = store.readTaskRecord(allocator, app.config.workspace_root, task_id) catch {
-        return jsonErrorResponse(allocator, .not_found, "UnknownTask");
-    };
-    defer task.deinit(allocator);
-
-    if (task.status == .running) {
-        return jsonErrorResponse(allocator, .conflict, "TaskAlreadyRunning");
-    }
-    if (task.status == .completed) {
-        return jsonErrorResponse(allocator, .conflict, "TaskAlreadyCompleted");
-    }
-
-    try docs_sync.appendLog(allocator, app.config.workspace_root, "workbench task resumed");
-    try startBackgroundRun(app, task.id);
-    return renderTaskDetailResponse(allocator, app.config.workspace_root, task.id);
-}
-
-fn startBackgroundRun(app: *const App, task_id: []const u8) !void {
-    const allocator = std.heap.page_allocator;
-    const job = try allocator.create(BackgroundRun);
-    errdefer allocator.destroy(job);
-
-    job.* = .{
-        .config = try cloneConfig(allocator, app.config.*),
-        .task_id = try allocator.dupe(u8, task_id),
-        .transport = app.transport,
-    };
-
-    const thread = try std.Thread.spawn(.{}, runTaskThread, .{job});
-    thread.detach();
-}
-
-fn runTaskThread(job: *BackgroundRun) void {
-    defer job.deinit();
-
-    var service = agents.Service.init(&job.config);
-
-    _ = loop.runPromptWithOptions(std.heap.page_allocator, job.config, "", .{
-        .transport = job.transport,
-        .execution_context = .{
-            .workspace_root = job.config.workspace_root,
-            .agent_service = service.handle(),
-        },
-        .task_id = job.task_id,
-    }) catch |err| {
-        logRuntimeError("background_task", job.task_id, err);
-        recordBackgroundTaskFailure(&job.config, job.task_id, @errorName(err));
-    };
-}
-
-fn logRuntimeError(scope: []const u8, task_id: ?[]const u8, err: anyerror) void {
-    if (task_id) |value| {
-        std.debug.print("VAR1 runtime error scope={s} task_id={s} error={s}\n", .{
-            scope,
-            value,
-            @errorName(err),
-        });
-        return;
-    }
-
-    std.debug.print("VAR1 runtime error scope={s} error={s}\n", .{
-        scope,
-        @errorName(err),
-    });
-}
-
-fn recordBackgroundTaskFailure(config: *const types.Config, task_id: []const u8, failure_reason: []const u8) void {
-    var task = store.readTaskRecord(std.heap.page_allocator, config.workspace_root, task_id) catch return;
-    defer task.deinit(std.heap.page_allocator);
-
-    if (task.status == .completed or task.status == .failed) return;
-
-    store.appendJournal(std.heap.page_allocator, config.workspace_root, task.id, .{
-        .event_type = "task_failed",
-        .message = failure_reason,
-        .timestamp_ms = std.time.milliTimestamp(),
-    }) catch {};
-    store.setTaskFailure(std.heap.page_allocator, config.workspace_root, &task, failure_reason) catch {};
-    docs_sync.writePending(std.heap.page_allocator, config.workspace_root, .{
-        .task_id = task.id,
-        .status = types.statusLabel(task.status),
-        .prompt = task.prompt,
-        .answer = failure_reason,
-        .updated_at_ms = task.updated_at_ms,
-    }) catch {};
-
-    const log_line = std.fmt.allocPrint(std.heap.page_allocator, "task failed: {s}", .{failure_reason}) catch return;
-    defer std.heap.page_allocator.free(log_line);
-    docs_sync.appendLog(std.heap.page_allocator, config.workspace_root, log_line) catch {};
-}
-
-fn cloneConfig(allocator: std.mem.Allocator, config: types.Config) !types.Config {
-    return .{
-        .openai_base_url = try allocator.dupe(u8, config.openai_base_url),
-        .openai_api_key = try allocator.dupe(u8, config.openai_api_key),
-        .openai_model = try allocator.dupe(u8, config.openai_model),
-        .harness_max_steps = config.harness_max_steps,
-        .workspace_root = try allocator.dupe(u8, config.workspace_root),
-    };
-}
-
-fn renderTaskListResponse(allocator: std.mem.Allocator, workspace_root: []const u8) !Response {
-    const tasks = try store.listTaskRecords(allocator, workspace_root);
-    defer types.deinitTaskRecords(allocator, tasks);
-
-    var body = std.array_list.Managed(u8).init(allocator);
-    errdefer body.deinit();
-    const writer = body.writer();
-
-    try writer.writeAll("{\"ok\":true,\"tasks\":[");
-    for (tasks, 0..) |task, index| {
-        if (index > 0) try writer.writeAll(",");
-        const latest_event = try store.readLatestJournalEvent(allocator, workspace_root, task.id);
-        defer if (latest_event) |event| event.deinit(allocator);
-        try writeTaskObject(writer, task, latest_event, null);
-    }
-    try writer.writeAll("]}");
-
-    return .{
-        .status = .ok,
-        .content_type = "application/json; charset=utf-8",
-        .body = try body.toOwnedSlice(),
-    };
-}
-
-fn renderTaskDetailResponse(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    task_id: []const u8,
-) !Response {
-    return renderTaskDetailResponseWithStatus(allocator, workspace_root, task_id, .ok);
-}
-
-fn renderTaskDetailResponseWithStatus(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    task_id: []const u8,
-    status: std.http.Status,
-) !Response {
-    var task = store.readTaskRecord(allocator, workspace_root, task_id) catch {
-        return jsonErrorResponse(allocator, .not_found, "UnknownTask");
-    };
-    defer task.deinit(allocator);
-
-    const latest_event = try store.readLatestJournalEvent(allocator, workspace_root, task.id);
-    defer if (latest_event) |event| event.deinit(allocator);
-
-    const answer = try store.readFinalAnswer(allocator, workspace_root, task.id);
-    defer if (answer) |value| allocator.free(value);
-
-    var body = std.array_list.Managed(u8).init(allocator);
-    errdefer body.deinit();
-    const writer = body.writer();
-
-    try writer.writeAll("{\"ok\":true,\"task\":");
-    try writeTaskObject(writer, task, latest_event, answer);
-    try writer.writeAll("}");
-
+fn jsonResponse(allocator: std.mem.Allocator, status: std.http.Status, payload_json: []const u8) !Response {
     return .{
         .status = status,
         .content_type = "application/json; charset=utf-8",
-        .body = try body.toOwnedSlice(),
+        .body = try allocator.dupe(u8, payload_json),
     };
 }
 
-fn renderTaskJournalResponse(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    task_id: []const u8,
-) !Response {
-    var task = store.readTaskRecord(allocator, workspace_root, task_id) catch {
-        return jsonErrorResponse(allocator, .not_found, "UnknownTask");
-    };
-    defer task.deinit(allocator);
-
-    const events = try store.readJournalEvents(allocator, workspace_root, task_id);
-    defer types.deinitJournalEvents(allocator, events);
-
-    var body = std.array_list.Managed(u8).init(allocator);
-    errdefer body.deinit();
-    const writer = body.writer();
-
-    try writer.writeAll("{\"ok\":true,\"events\":[");
-    for (events, 0..) |event, index| {
-        if (index > 0) try writer.writeAll(",");
-        try writeJournalEventObject(writer, event);
-    }
-    try writer.writeAll("]}");
-
-    return .{
-        .status = .ok,
-        .content_type = "application/json; charset=utf-8",
-        .body = try body.toOwnedSlice(),
-    };
-}
-
-fn renderTaskTurnsResponse(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    task_id: []const u8,
-) !Response {
-    var task = store.readTaskRecord(allocator, workspace_root, task_id) catch {
-        return jsonErrorResponse(allocator, .not_found, "UnknownTask");
-    };
-    defer task.deinit(allocator);
-
-    const turns = try store.readConversationTurns(allocator, workspace_root, task_id);
-    defer types.deinitConversationTurns(allocator, turns);
-
-    var body = std.array_list.Managed(u8).init(allocator);
-    errdefer body.deinit();
-    const writer = body.writer();
-
-    try writer.writeAll("{\"ok\":true,\"turns\":[");
-    for (turns, 0..) |turn, index| {
-        if (index > 0) try writer.writeAll(",");
-        try writeConversationTurnObject(writer, turn);
-    }
-    try writer.writeAll("]}");
-
-    return .{
-        .status = .ok,
-        .content_type = "application/json; charset=utf-8",
-        .body = try body.toOwnedSlice(),
-    };
-}
-
-fn jsonSuccess(
-    allocator: std.mem.Allocator,
-    status: std.http.Status,
-    payload: anytype,
-) !Response {
+fn jsonSuccess(allocator: std.mem.Allocator, status: std.http.Status, payload: anytype) !Response {
     return .{
         .status = status,
         .content_type = "application/json; charset=utf-8",
-        .body = try std.fmt.allocPrint(allocator, "{f}", .{
-            std.json.fmt(payload, .{}),
-        }),
+        .body = try renderJsonAlloc(allocator, payload),
     };
 }
 
@@ -554,55 +714,20 @@ fn jsonErrorResponse(
     });
 }
 
-fn writeTaskObject(
-    writer: anytype,
-    task: types.TaskRecord,
-    latest_event: ?types.JournalEvent,
-    answer: ?[]const u8,
-) !void {
-    try writer.writeAll("{\"id\":");
-    try writeJsonValue(writer, task.id);
-    try writer.writeAll(",\"prompt\":");
-    try writeJsonValue(writer, task.prompt);
-    try writer.writeAll(",\"status\":");
-    try writeJsonValue(writer, types.statusLabel(task.status));
-    try writer.writeAll(",\"parent_task_id\":");
-    try writeOptionalString(writer, task.parent_task_id);
-    try writer.writeAll(",\"display_name\":");
-    try writeOptionalString(writer, task.display_name);
-    try writer.writeAll(",\"agent_profile\":");
-    try writeOptionalString(writer, task.agent_profile);
-    try writer.writeAll(",\"failure_reason\":");
-    try writeOptionalString(writer, task.failure_reason);
-    try writer.print(",\"created_at_ms\":{d}", .{task.created_at_ms});
-    try writer.print(",\"updated_at_ms\":{d}", .{task.updated_at_ms});
-    try writer.writeAll(",\"latest_event\":");
-    if (latest_event) |event| {
-        try writeJournalEventObject(writer, event);
-    } else {
-        try writer.writeAll("null");
-    }
-    try writer.writeAll(",\"answer\":");
-    try writeOptionalString(writer, answer);
-    try writer.writeAll("}");
+fn callKernelResult(
+    allocator: std.mem.Allocator,
+    bridge: *Bridge,
+    method: []const u8,
+    params_json: []const u8,
+) ![]u8 {
+    const call = try bridge.kernel.call(allocator, method, params_json);
+    defer call.deinit(allocator);
+    return expectKernelResult(allocator, call);
 }
 
-fn writeJournalEventObject(writer: anytype, event: types.JournalEvent) !void {
-    try writer.writeAll("{\"event_type\":");
-    try writeJsonValue(writer, event.event_type);
-    try writer.writeAll(",\"message\":");
-    try writeJsonValue(writer, event.message);
-    try writer.print(",\"timestamp_ms\":{d}", .{event.timestamp_ms});
-    try writer.writeAll("}");
-}
-
-fn writeConversationTurnObject(writer: anytype, turn: types.ConversationTurn) !void {
-    try writer.writeAll("{\"role\":");
-    try writeJsonValue(writer, types.conversationTurnRoleLabel(turn.role));
-    try writer.writeAll(",\"content\":");
-    try writeJsonValue(writer, turn.content);
-    try writer.print(",\"timestamp_ms\":{d}", .{turn.timestamp_ms});
-    try writer.writeAll("}");
+fn expectKernelResult(allocator: std.mem.Allocator, call: stdio_rpc.RpcCallResult) ![]u8 {
+    if (call.error_json) |_| return error.KernelRpcError;
+    return allocator.dupe(u8, call.result_json orelse return error.KernelRpcError);
 }
 
 fn writeOptionalString(writer: anytype, value: ?[]const u8) !void {
@@ -614,9 +739,55 @@ fn writeOptionalString(writer: anytype, value: ?[]const u8) !void {
 }
 
 fn writeJsonValue(writer: anytype, value: anytype) !void {
-    const json = try std.fmt.allocPrint(std.heap.page_allocator, "{f}", .{
-        std.json.fmt(value, .{}),
-    });
+    const json = try renderJsonAlloc(std.heap.page_allocator, value);
     defer std.heap.page_allocator.free(json);
     try writer.writeAll(json);
+}
+
+fn renderJsonAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{f}", .{
+        std.json.fmt(value, .{}),
+    });
+}
+
+fn logBridgeError(scope: []const u8, session_id: ?[]const u8, err: anyerror) void {
+    if (session_id) |value| {
+        std.debug.print("VAR1 bridge error scope={s} session_id={s} error={s}\n", .{
+            scope,
+            value,
+            @errorName(err),
+        });
+        return;
+    }
+
+    std.debug.print("VAR1 bridge error scope={s} error={s}\n", .{
+        scope,
+        @errorName(err),
+    });
+}
+
+fn localKernelCall(
+    ctx: ?*anyopaque,
+    _: std.mem.Allocator,
+    method: []const u8,
+    params_json: []const u8,
+) anyerror!stdio_rpc.RpcCallResult {
+    var client: *stdio_rpc.LocalClient = @ptrCast(@alignCast(ctx.?));
+    return client.call(method, params_json);
+}
+
+fn localKernelWaitNotificationAfter(
+    ctx: ?*anyopaque,
+    _: std.mem.Allocator,
+    after_sequence: u64,
+    timeout_ms: usize,
+) anyerror!?stdio_rpc.Notification {
+    var client: *stdio_rpc.LocalClient = @ptrCast(@alignCast(ctx.?));
+    return client.waitForNotificationAfter(after_sequence, timeout_ms);
+}
+
+fn localKernelDeinit(ctx: ?*anyopaque, allocator: std.mem.Allocator) void {
+    var client: *stdio_rpc.LocalClient = @ptrCast(@alignCast(ctx.?));
+    client.deinit();
+    allocator.destroy(client);
 }
