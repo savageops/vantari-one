@@ -2,7 +2,8 @@
 
 <div align="center">
 
-Ventari 1 provides a project-local agent runtime that executes model sessions through the `VAR1` Zig kernel, persists replayable `.var/sessions` ledgers, and exposes CLI/browser ingress through JSON-RPC and HTTP bridge contracts.
+Ventari 1 is a local agent harness for running, extending, and supervising AI agent sessions from a fast Zig runtime.
+`VAR1` is the kernel underneath it: CLI and browser clients drive sessions, tools, context, providers, events, and output through one coherent protocol.
 
 [![Release](https://img.shields.io/github/v/release/savageops/VANTARI-ONE?display_name=tag&sort=semver&label=Release)](https://github.com/savageops/VANTARI-ONE/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/savageops/VANTARI-ONE/total?label=Downloads)](https://github.com/savageops/VANTARI-ONE/releases)
@@ -14,17 +15,50 @@ Ventari 1 provides a project-local agent runtime that executes model sessions th
 [![License: MIT](https://img.shields.io/badge/License-MIT-0f766e)](./LICENSE)
 
 [Architecture](#architectural-overview) |
+[Quick Start](#quick-start) |
 [Capabilities](#capabilities) |
-[Session Ledger](#session-ledger) |
+[Session State](#session-state) |
 [Protocol](#protocol-contract) |
 [Configuration](#configuration) |
 [Validation](#validation)
 
-<img src="./.docs/assets/vantari-one-hero.svg" alt="VANTARI-ONE architecture: thin clients, JSON-RPC bridge, VAR1 kernel, and .var session storage" width="100%">
-
 </div>
 
 ---
+
+## Why Ventari
+
+Ventari is built for people who want to operate agents, not babysit scattered scripts. It gives each agent run a session, a tool surface, provider configuration, context management, event history, and CLI/browser control through one Zig-powered harness.
+
+## At a Glance
+
+| Surface | Contract |
+|---|---|
+| Harness kernel | `VAR1`, a Zig executable with one hidden `kernel-stdio` host mode |
+| Agent sessions | `.var/sessions/<id>/` with transcript, context checkpoints, events, and output |
+| Protocol | JSON-RPC 2.0 over stdio, plus an HTTP bridge for browser clients |
+| Context | Builder-owned model windows from immutable messages plus compact checkpoints |
+| Tools | Built-in schema catalog with explicit external command boundaries |
+| Clients | CLI and framework-free browser shell; neither owns runtime state |
+
+## Quick Start
+
+Build the kernel, verify readiness, then run one prompt from the backend lane:
+
+```powershell
+cd apps/backend/variant-1
+.\scripts\zigw.ps1 build test --summary all
+.\scripts\health.ps1
+.\zig-out\bin\VAR1.exe run --prompt "Return exactly 3."
+```
+
+Open the browser client after the bridge is running:
+
+```powershell
+.\zig-out\bin\VAR1.exe serve --host 127.0.0.1 --port 4310
+```
+
+Then open [`apps/frontend/var1-client/index.html`](./apps/frontend/var1-client/index.html) and point it at `http://127.0.0.1:4310`.
 
 ## Architectural Overview
 
@@ -51,21 +85,21 @@ flowchart TB
     kernel --> events["event emission"]
   end
 
-  sessions --> ledger[".var/sessions"]
+  sessions --> sessionState[".var/sessions"]
   context --> provider
   tools --> events
   provider --> events
-  events --> ledger
+  events --> sessionState
 ```
 
-`VAR1` is the execution boundary. CLI and browser surfaces are clients. Session state, transcript assembly, provider interaction, tool dispatch, and event emission remain kernel-owned.
+`VAR1` runs the agent work. CLI and browser surfaces send protocol requests into the same harness runtime. Session state, transcript assembly, provider interaction, tool dispatch, and event emission stay inside the Zig kernel.
 
 ## Capabilities
 
 | Capability | Contract |
 |---|---|
 | Session-native execution | Creates, resumes, sends, compacts, cancels, reads, and lists sessions through the protocol surface. |
-| Durable transcript ledger | Persists user/assistant messages in `messages.jsonl` with stable message identifiers and monotonic sequence numbers. |
+| Session history | Persists user/assistant messages in `messages.jsonl` with stable message identifiers and monotonic sequence numbers. |
 | Context compilation | Builds provider-ready message windows from `session.json`, `messages.jsonl`, and the latest `context.jsonl` checkpoint. |
 | Checkpointed compaction path | Generates deterministic Zig-native summary checkpoints in `context.jsonl` without replacing the complete transcript. |
 | Event persistence | Records runtime progress, tool lifecycle entries, bridge notifications, and terminal state in `events.jsonl`. |
@@ -84,7 +118,7 @@ Tool contracts are kernel-owned. The live registry starts in `src/core/tools/run
 
 Plugin support is currently contract-level: `src/core/tools/sockets.zig` validates typed tool sockets and `src/core/plugins/manifest.zig` validates plugin socket declarations. There is no automatic plugin discovery or dynamic plugin execution in the shipped runtime.
 
-## Session Ledger
+## Session State
 
 ```text
 .var/sessions/<session-id>/
@@ -99,7 +133,7 @@ Plugin support is currently contract-level: `src/core/tools/sockets.zig` validat
 |---|---|
 | `session.json` | lifecycle state, prompt metadata, provider/runtime fields, parent/continuation references |
 | `messages.jsonl` | complete durable transcript |
-| `context.jsonl` | compacted/model-ready checkpoint ledger |
+| `context.jsonl` | compacted/model-ready checkpoint history |
 | `events.jsonl` | progress, tool, bridge, and runtime events |
 | `output.txt` | latest terminal assistant output |
 
@@ -116,7 +150,7 @@ flowchart LR
   output --> terminal["output.txt"]
 ```
 
-`messages.jsonl` and `context.jsonl` are separate control planes. The transcript remains the audit ledger; context checkpoints constrain the provider-visible working set.
+`messages.jsonl` and `context.jsonl` are separate control planes. The transcript remains the complete session history; context checkpoints constrain the provider-visible working set.
 
 ## Protocol Contract
 
@@ -197,8 +231,7 @@ Provider-backed smoke validation depends on the configured provider exposing `MO
 
 - [`apps/backend/variant-1/README.md`](./apps/backend/variant-1/README.md)
 - [`apps/backend/variant-1/architecture.md`](./apps/backend/variant-1/architecture.md)
-- [`.docs/research/2026-04-24-context-builder-baseline.md`](./.docs/research/2026-04-24-context-builder-baseline.md)
-- [`.docs/research/2026-04-24-pluggable-backend-hierarchy-baseline.md`](./.docs/research/2026-04-24-pluggable-backend-hierarchy-baseline.md)
+- [`apps/frontend/var1-client/README.md`](./apps/frontend/var1-client/README.md)
 
 ## License
 

@@ -2,8 +2,8 @@
 
 ## Runtime Ownership
 
-- `apps/backend/variant-1` is the only live code lane until another app/package has real runtime ownership.
-- `VAR1` is a headless kernel first. CLI, browser, and future desktop shells are clients.
+- `apps/backend/variant-1` is the only live code lane until another app/package has real runtime responsibility.
+- `VAR1` is the Zig harness kernel. CLI, browser, and future desktop shells are clients of the same agent-session runtime.
 - `.var/` is the only runtime/process state root. Do not add old runtime roots, old storage ownership, or fallback storage readers.
 - Project-local `.var/sessions/<session-id>/` is canonical. Do not copy global home-scoped Codex/Claude project-directory session IDs into this repo.
 
@@ -21,7 +21,7 @@ Canonical session layout:
 ```
 
 - `messages.jsonl` is the complete durable transcript. It must be append-only after the context baseline lands.
-- `context.jsonl` is the compacted/model-ready checkpoint ledger. It must not become a second full transcript.
+- `context.jsonl` is the compacted/model-ready checkpoint history. It must not become a second full transcript.
 - Add stable message IDs and monotonic sequence numbers before compaction boundaries depend on message positions.
 - Do not add migration readers for pre-`.var/sessions` layouts; this product starts from the current session contract.
 
@@ -40,7 +40,7 @@ Canonical session layout:
 
 - Build the invariant that should survive later runtime scale, not the dominant harness pattern that exists now.
 - Study references for failure modes, boundary shapes, and useful invariants only. Do not reproduce their incidental architecture.
-- Prefer primitives that are simultaneously smaller and more expressive: append-only ledgers, typed checkpoints, explicit state machines, and deterministic ownership.
+- Prefer primitives that are simultaneously smaller and more expressive: append-only session history, typed checkpoints, explicit state machines, and deterministic ownership.
 - A dynamic worker is admissible only when it calls the same proven primitive as manual execution and adds measurable capability beyond scheduling.
 
 ## Source Hierarchy

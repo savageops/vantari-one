@@ -1,21 +1,28 @@
 # VAR1 Zig Kernel
 
-`apps/backend/variant-1` is the live `VAR1` runtime lane inside `VANTARI-ONE`.
+`VAR1` is the Zig kernel that runs Ventari 1 agent sessions. It owns session storage, context construction, provider transport, tool dispatch, and bridge events so the CLI and browser use the same harness behavior.
 
-The current architecture is no longer an embedded workbench app. It is a headless session kernel with two thin clients:
+This app is the only live backend lane in the repository. Operators use the CLI, browser users talk through the bridge, and agent-session state stays inside `.var/sessions`.
 
-- a protocol-backed CLI
-- an external browser client in `apps/frontend/var1-client`
+## At a glance
 
-`VAR1 serve` is now a bridge, not a UI host.
+| Surface | Current contract |
+| --- | --- |
+| Executable | `VAR1` |
+| Hidden host | `kernel-stdio` |
+| CLI owner | `src/clients/cli.zig` |
+| Browser bridge | `src/host/http_bridge.zig` |
+| Protocol | JSON-RPC 2.0 over stdio with Content-Length framing |
+| State root | `.var/sessions/<id>/` |
+| Provider boundary | `src/core/providers/openai_compatible.zig` |
+| Tool runtime | `src/core/tools/runtime.zig` |
 
 ## What ships
 
-- one executable name: `VAR1`
-- one hidden host mode: `kernel-stdio`
-- one canonical protocol: JSON-RPC 2.0 over stdio with Content-Length framing
-- one canonical durable runtime root: `.var/sessions/<id>/`
-- one browser-facing bridge surface:
+- `VAR1 run` for direct prompt execution.
+- `VAR1 health` for provider and runtime readiness.
+- `VAR1 tools` for the built-in schema catalog.
+- `VAR1 serve` for the browser-facing bridge:
   - `POST /rpc`
   - `GET /events`
   - `GET /api/health`
@@ -32,7 +39,7 @@ Each durable run lives under `.var/sessions/<id>/`:
 - `events.jsonl`
 - `output.txt`
 
-`messages.jsonl` is the append-only durable transcript. `context.jsonl` is the compact checkpoint ledger produced by `core/context/compactor.zig` and consumed by the context builder; it is not a second full transcript.
+`messages.jsonl` is the append-only session transcript. `context.jsonl` is the compact checkpoint history produced by `core/context/compactor.zig` and consumed by the context builder; it is not a second full transcript.
 
 Session ids remain opaque. The store mints `session-...` ids for new runs.
 
@@ -64,6 +71,16 @@ File tools are split by role:
 An installed runtime must provide a real `iex` executable for `search_files`. PowerShell aliases are not enough for the Zig child-process runner. If `iex` is absent, search is unavailable at the command dependency boundary; it should not be represented as a native bundled capability.
 
 `src/core/tools/sockets.zig` and `src/core/plugins/manifest.zig` are validation boundaries for typed sockets and plugin manifests. They do not load plugins, auto-discover plugin roots, or mutate the model-visible tool list.
+
+## Quick start
+
+Build, test, check provider readiness, then run one prompt:
+
+```powershell
+.\scripts\zigw.ps1 build test --summary all
+.\scripts\health.ps1
+.\zig-out\bin\VAR1.exe run --prompt "Count the lowercase letter r in strawberry."
+```
 
 ## Commands
 

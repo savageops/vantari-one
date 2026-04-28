@@ -1,6 +1,6 @@
 # VAR1 Architecture
 
-This is the canonical architecture map for the current `VAR1` runtime.
+This is the canonical architecture map for the current `VAR1` agent harness runtime.
 
 ## Architecture lock
 
@@ -145,7 +145,7 @@ Every session directory contains:
 - `events.jsonl`
 - `output.txt`
 
-`messages.jsonl` is the complete append-only transcript. `context.jsonl` is a compact checkpoint ledger written by the context compactor and used by the context builder to create model-visible history without rewriting transcript history. Each checkpoint marks the covered source sequence range, the next raw `first_kept_seq`, `compacted_entry_count`, and `aggressiveness_milli`, so compaction can advance one JSONL entry at a time or recompact an existing range when a stronger slider value is requested.
+`messages.jsonl` is the complete append-only transcript. `context.jsonl` is compact checkpoint history written by the context compactor and used by the context builder to create model-visible history without rewriting transcript history. Each checkpoint marks the covered source sequence range, the next raw `first_kept_seq`, `compacted_entry_count`, and `aggressiveness_milli`, so compaction can advance one JSONL entry at a time or recompact an existing range when a stronger slider value is requested.
 
 `store.ensureStoreReady(...)` validates and rewrites existing `.var/sessions/<id>/session.json` records into the current canonical shape. It does not read old roots, old-layout files, or old-layout fields.
 
