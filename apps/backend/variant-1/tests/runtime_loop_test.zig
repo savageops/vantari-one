@@ -8,13 +8,13 @@ fn tmpWorkspacePath(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir) ![]u
 fn makeConfig(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
-    harness_max_steps: usize,
-) !VAR1.types.Config {
+    max_steps: usize,
+) !VAR1.shared.types.Config {
     return .{
         .openai_base_url = try allocator.dupe(u8, "http://127.0.0.1:1234"),
         .openai_api_key = try allocator.dupe(u8, "test-key"),
         .openai_model = try allocator.dupe(u8, "gemma-4-e2b-it"),
-        .harness_max_steps = harness_max_steps,
+        .max_steps = max_steps,
         .workspace_root = try allocator.dupe(u8, workspace_root),
     };
 }
@@ -197,14 +197,14 @@ test "provider parses a mock OpenAI-compatible chat completion" {
     const config = try makeConfig(std.testing.allocator, ".", 4);
     defer config.deinit(std.testing.allocator);
 
-    var messages = [_]VAR1.types.ChatMessage{
-        try VAR1.types.initTextMessage(std.testing.allocator, .user, "how many r in strawberry"),
+    var messages = [_]VAR1.shared.types.ChatMessage{
+        try VAR1.shared.types.initTextMessage(std.testing.allocator, .user, "how many r in strawberry"),
     };
     defer messages[0].deinit(std.testing.allocator);
 
-    const completion = try VAR1.provider.completeWithTransport(std.testing.allocator, config, .{
+    const completion = try VAR1.core.provider_runtime.completeWithTransport(std.testing.allocator, config, .{
         .messages = messages[0..],
-        .tool_definitions = VAR1.tools.builtinDefinitions(false),
+        .tool_definitions = VAR1.core.tool_runtime.builtinDefinitions(false),
     }, .{
         .context = null,
         .sendFn = mockSendSuccess,
@@ -217,10 +217,10 @@ test "provider parses a mock OpenAI-compatible chat completion" {
 }
 
 test "provider completion url keeps explicit versioned bases intact" {
-    const versioned = try VAR1.provider.completionUrl(std.testing.allocator, "https://api.z.ai/api/coding/paas/v4");
+    const versioned = try VAR1.core.provider_runtime.completionUrl(std.testing.allocator, "https://api.z.ai/api/coding/paas/v4");
     defer std.testing.allocator.free(versioned);
 
-    const local = try VAR1.provider.completionUrl(std.testing.allocator, "http://127.0.0.1:1234");
+    const local = try VAR1.core.provider_runtime.completionUrl(std.testing.allocator, "http://127.0.0.1:1234");
     defer std.testing.allocator.free(local);
 
     try std.testing.expectEqualStrings("https://api.z.ai/api/coding/paas/v4/chat/completions", versioned);
@@ -246,7 +246,7 @@ test "provider native http transport posts JSON over a single in-process path" {
     );
     defer std.testing.allocator.free(url);
 
-    const body = try VAR1.provider.httpSend(
+    const body = try VAR1.core.provider_runtime.httpSend(
         null,
         std.testing.allocator,
         url,
@@ -276,7 +276,7 @@ test "loop writes runtime state and archives docs on success" {
     const config = try makeConfig(std.testing.allocator, workspace_root, 4);
     defer config.deinit(std.testing.allocator);
 
-    const result = try VAR1.loop.runPromptWithTransport(std.testing.allocator, config, "how many r in strawberry", .{
+    const result = try VAR1.core.executor.runPromptWithTransport(std.testing.allocator, config, "how many r in strawberry", .{
         .context = null,
         .sendFn = mockSendSuccess,
     });
@@ -284,9 +284,9 @@ test "loop writes runtime state and archives docs on success" {
 
     try std.testing.expect(std.mem.indexOf(u8, result.output, "3") != null);
 
-    const changelog_path = try VAR1.docs_sync.changelogSlicePath(std.testing.allocator, workspace_root, result.session_id);
+    const changelog_path = try VAR1.core.docs_sync.changelogSlicePath(std.testing.allocator, workspace_root, result.session_id);
     defer std.testing.allocator.free(changelog_path);
-    try std.testing.expect(VAR1.fsutil.fileExists(changelog_path));
+    try std.testing.expect(VAR1.shared.fsutil.fileExists(changelog_path));
 }
 
 test "loop can resume a precreated child session and preserve delegation metadata" {
@@ -299,13 +299,13 @@ test "loop can resume a precreated child session and preserve delegation metadat
     const config = try makeConfig(std.testing.allocator, workspace_root, 4);
     defer config.deinit(std.testing.allocator);
 
-    var child_session = try VAR1.store.initSessionWithOptions(
+    var child_session = try VAR1.core.session_store.initSessionWithOptions(
         std.testing.allocator,
         workspace_root,
         "how many r in strawberry",
         .{
             .status = .initialized,
-            .parent_session_id = "task-parent",
+            .parent_session_id = "session-parent",
             .display_name = "berry-child",
             .agent_profile = "subagent",
         },
@@ -315,7 +315,7 @@ test "loop can resume a precreated child session and preserve delegation metadat
     var context = ResumePromptContext{ .allocator = std.testing.allocator };
     defer context.deinit();
 
-    const result = try VAR1.loop.runPromptWithOptions(std.testing.allocator, config, "", .{
+    const result = try VAR1.core.executor.runPromptWithOptions(std.testing.allocator, config, "", .{
         .transport = .{
             .context = &context,
             .sendFn = mockSendResumePrompt,
@@ -329,83 +329,14 @@ test "loop can resume a precreated child session and preserve delegation metadat
 
     try std.testing.expectEqualStrings(child_session.id, result.session_id);
 
-    var persisted = try VAR1.store.readSessionRecord(std.testing.allocator, workspace_root, child_session.id);
+    var persisted = try VAR1.core.session_store.readSessionRecord(std.testing.allocator, workspace_root, child_session.id);
     defer persisted.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(VAR1.types.SessionStatus.completed, persisted.status);
-    try std.testing.expectEqualStrings("task-parent", persisted.parent_session_id.?);
+    try std.testing.expectEqual(VAR1.shared.types.SessionStatus.completed, persisted.status);
+    try std.testing.expectEqualStrings("session-parent", persisted.parent_session_id.?);
     try std.testing.expectEqualStrings("berry-child", persisted.display_name.?);
     try std.testing.expectEqualStrings("subagent", persisted.agent_profile.?);
     try std.testing.expect(std.mem.indexOf(u8, context.payload.?, "how many r in strawberry") != null);
-}
-
-test "loop replays prior prompt and output messages for continued runs" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
-    defer std.testing.allocator.free(workspace_root);
-
-    const config = try makeConfig(std.testing.allocator, workspace_root, 4);
-    defer config.deinit(std.testing.allocator);
-
-    var first = try VAR1.store.initSessionWithOptions(
-        std.testing.allocator,
-        workspace_root,
-        "What is VAR1?",
-        .{
-            .status = .completed,
-        },
-    );
-    defer first.deinit(std.testing.allocator);
-    try VAR1.store.writeOutput(std.testing.allocator, workspace_root, first.id, "VAR1 is the Zig harness.");
-
-    var second = try VAR1.store.initSessionWithOptions(
-        std.testing.allocator,
-        workspace_root,
-        "How does the bridge read it?",
-        .{
-            .status = .completed,
-            .continued_from_session_id = first.id,
-        },
-    );
-    defer second.deinit(std.testing.allocator);
-    try VAR1.store.writeOutput(std.testing.allocator, workspace_root, second.id, "The browser bridge reads canonical session files.");
-
-    var third = try VAR1.store.initSessionWithOptions(
-        std.testing.allocator,
-        workspace_root,
-        "Can I continue the conversation?",
-        .{
-            .status = .initialized,
-            .continued_from_session_id = second.id,
-        },
-    );
-    defer third.deinit(std.testing.allocator);
-
-    var context = ResumePromptContext{ .allocator = std.testing.allocator };
-    defer context.deinit();
-
-    const result = try VAR1.loop.runPromptWithOptions(std.testing.allocator, config, "", .{
-        .transport = .{
-            .context = &context,
-            .sendFn = mockSendResumePrompt,
-        },
-        .execution_context = .{
-            .workspace_root = config.workspace_root,
-        },
-        .session_id = third.id,
-    });
-    defer result.deinit(std.testing.allocator);
-
-    try std.testing.expectEqualStrings(third.id, result.session_id);
-
-    const payload = context.payload.?;
-    try std.testing.expect(std.mem.indexOf(u8, payload, "What is VAR1?") != null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "VAR1 is the Zig harness.") != null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "How does the bridge read it?") != null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "The browser bridge reads canonical session files.") != null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "Can I continue the conversation?") != null);
 }
 
 test "loop resumes a same-session transcript from canonical messages" {
@@ -418,7 +349,7 @@ test "loop resumes a same-session transcript from canonical messages" {
     const config = try makeConfig(std.testing.allocator, workspace_root, 4);
     defer config.deinit(std.testing.allocator);
 
-    var session = try VAR1.store.initSessionWithOptions(
+    var session = try VAR1.core.session_store.initSessionWithOptions(
         std.testing.allocator,
         workspace_root,
         "What is VAR1?",
@@ -427,15 +358,15 @@ test "loop resumes a same-session transcript from canonical messages" {
         },
     );
     defer session.deinit(std.testing.allocator);
-    try VAR1.store.writeOutput(std.testing.allocator, workspace_root, session.id, "VAR1 is the Zig harness.");
-    try VAR1.store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "VAR1 is the Zig harness.", std.time.milliTimestamp());
-    try VAR1.store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Can I continue the conversation?", std.time.milliTimestamp());
-    try VAR1.store.setSessionPrompt(std.testing.allocator, workspace_root, &session, "Can I continue the conversation?", .initialized);
+    try VAR1.core.session_store.writeOutput(std.testing.allocator, workspace_root, session.id, "VAR1 is the Zig kernel.");
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "VAR1 is the Zig kernel.", std.time.milliTimestamp());
+    try VAR1.core.session_store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Can I continue the conversation?", std.time.milliTimestamp());
+    try VAR1.core.session_store.setSessionPrompt(std.testing.allocator, workspace_root, &session, "Can I continue the conversation?", .initialized);
 
     var context = ResumePromptContext{ .allocator = std.testing.allocator };
     defer context.deinit();
 
-    const result = try VAR1.loop.runPromptWithOptions(std.testing.allocator, config, "", .{
+    const result = try VAR1.core.executor.runPromptWithOptions(std.testing.allocator, config, "", .{
         .transport = .{
             .context = &context,
             .sendFn = mockSendResumePrompt,
@@ -451,13 +382,13 @@ test "loop resumes a same-session transcript from canonical messages" {
 
     const payload = context.payload.?;
     try std.testing.expect(std.mem.indexOf(u8, payload, "What is VAR1?") != null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "VAR1 is the Zig harness.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "VAR1 is the Zig kernel.") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "Can I continue the conversation?") != null);
 
-    const messages = try VAR1.store.readSessionMessages(std.testing.allocator, workspace_root, session.id);
-    defer VAR1.types.deinitSessionMessages(std.testing.allocator, messages);
+    const messages = try VAR1.core.session_store.readSessionMessages(std.testing.allocator, workspace_root, session.id);
+    defer VAR1.shared.types.deinitSessionMessages(std.testing.allocator, messages);
     try std.testing.expectEqual(@as(usize, 4), messages.len);
-    try std.testing.expectEqual(VAR1.types.SessionMessageRole.assistant, messages[3].role);
+    try std.testing.expectEqual(VAR1.shared.types.SessionMessageRole.assistant, messages[3].role);
     try std.testing.expectEqualStrings("3", messages[3].content);
 }
 
@@ -471,15 +402,15 @@ test "loop records a failed session when provider transport fails" {
     const config = try makeConfig(std.testing.allocator, workspace_root, 4);
     defer config.deinit(std.testing.allocator);
 
-    try std.testing.expectError(error.ConnectionRefused, VAR1.loop.runPromptWithTransport(std.testing.allocator, config, "how many r in strawberry", .{
+    try std.testing.expectError(error.ConnectionRefused, VAR1.core.executor.runPromptWithTransport(std.testing.allocator, config, "how many r in strawberry", .{
         .context = null,
         .sendFn = mockSendFailure,
     }));
 
-    const sessions = try VAR1.store.listSessionRecords(std.testing.allocator, workspace_root);
-    defer VAR1.types.deinitSessionRecords(std.testing.allocator, sessions);
+    const sessions = try VAR1.core.session_store.listSessionRecords(std.testing.allocator, workspace_root);
+    defer VAR1.shared.types.deinitSessionRecords(std.testing.allocator, sessions);
     try std.testing.expectEqual(@as(usize, 1), sessions.len);
-    try std.testing.expectEqual(VAR1.types.SessionStatus.failed, sessions[0].status);
+    try std.testing.expectEqual(VAR1.shared.types.SessionStatus.failed, sessions[0].status);
     try std.testing.expect(std.mem.eql(u8, sessions[0].failure_reason.?, "ConnectionRefused"));
 }
 
@@ -493,11 +424,11 @@ test "loop marks a session cancelled when hooks request cancellation" {
     const config = try makeConfig(std.testing.allocator, workspace_root, 4);
     defer config.deinit(std.testing.allocator);
 
-    var session = try VAR1.store.initSession(std.testing.allocator, workspace_root, "Cancel me");
+    var session = try VAR1.core.session_store.initSession(std.testing.allocator, workspace_root, "Cancel me");
     defer session.deinit(std.testing.allocator);
 
     var cancel_context = CancelContext{};
-    try std.testing.expectError(VAR1.loop.Error.Cancelled, VAR1.loop.runPromptWithOptions(std.testing.allocator, config, "", .{
+    try std.testing.expectError(VAR1.core.executor.Error.Cancelled, VAR1.core.executor.runPromptWithOptions(std.testing.allocator, config, "", .{
         .transport = .{
             .context = null,
             .sendFn = mockSendSuccess,
@@ -512,11 +443,11 @@ test "loop marks a session cancelled when hooks request cancellation" {
         },
     }));
 
-    var persisted = try VAR1.store.readSessionRecord(std.testing.allocator, workspace_root, session.id);
+    var persisted = try VAR1.core.session_store.readSessionRecord(std.testing.allocator, workspace_root, session.id);
     defer persisted.deinit(std.testing.allocator);
-    try std.testing.expectEqual(VAR1.types.SessionStatus.cancelled, persisted.status);
+    try std.testing.expectEqual(VAR1.shared.types.SessionStatus.cancelled, persisted.status);
 
-    const latest_event = try VAR1.store.readLatestEvent(std.testing.allocator, workspace_root, session.id);
+    const latest_event = try VAR1.core.session_store.readLatestEvent(std.testing.allocator, workspace_root, session.id);
     defer if (latest_event) |event| event.deinit(std.testing.allocator);
     try std.testing.expect(latest_event != null);
     try std.testing.expectEqualStrings("session_cancelled", latest_event.?.event_type);
@@ -532,7 +463,7 @@ test "loop sanitizes leaked internal tool names without false child-wait messagi
     const config = try makeConfig(std.testing.allocator, workspace_root, 4);
     defer config.deinit(std.testing.allocator);
 
-    const result = try VAR1.loop.runPromptWithTransport(std.testing.allocator, config, "launch three child agents and keep me posted", .{
+    const result = try VAR1.core.executor.runPromptWithTransport(std.testing.allocator, config, "launch three child agents and keep me posted", .{
         .context = null,
         .sendFn = mockSendLeakyOperatorReply,
     });
@@ -555,7 +486,7 @@ test "loop allows internal tool names when prompt requests tool documentation" {
     const config = try makeConfig(std.testing.allocator, workspace_root, 4);
     defer config.deinit(std.testing.allocator);
 
-    const result = try VAR1.loop.runPromptWithTransport(std.testing.allocator, config, "Document launch_agent, agent_status, wait_agent, and list_agents usage.", .{
+    const result = try VAR1.core.executor.runPromptWithTransport(std.testing.allocator, config, "Document launch_agent, agent_status, wait_agent, and list_agents usage.", .{
         .context = null,
         .sendFn = mockSendLeakyOperatorReply,
     });
@@ -572,9 +503,9 @@ test "loop executes tool calls and exposes descriptors in the provider payload" 
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    const file_path = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, "context.txt" });
+    const file_path = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ workspace_root, "context.txt" });
     defer std.testing.allocator.free(file_path);
-    try VAR1.fsutil.writeText(file_path, "hello from file\nsecond line\n");
+    try VAR1.shared.fsutil.writeText(file_path, "hello from file\nsecond line\n");
 
     const config = try makeConfig(std.testing.allocator, workspace_root, 4);
     defer config.deinit(std.testing.allocator);
@@ -582,7 +513,7 @@ test "loop executes tool calls and exposes descriptors in the provider payload" 
     var context = ToolLoopContext{ .allocator = std.testing.allocator };
     defer context.deinit();
 
-    const result = try VAR1.loop.runPromptWithTransport(std.testing.allocator, config, "Read context.txt and tell me the first line.", .{
+    const result = try VAR1.core.executor.runPromptWithTransport(std.testing.allocator, config, "Read context.txt and tell me the first line.", .{
         .context = &context,
         .sendFn = mockSendToolLoop,
     });
@@ -592,13 +523,13 @@ test "loop executes tool calls and exposes descriptors in the provider payload" 
     try std.testing.expect(std.mem.indexOf(u8, context.payloads[0].?, "\"tools\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, context.payloads[0].?, "read_file") != null);
     try std.testing.expect(std.mem.indexOf(u8, context.payloads[0].?, "search_files") != null);
-    try std.testing.expect(std.mem.indexOf(u8, context.payloads[0].?, "harness_todo") == null);
+    try std.testing.expect(std.mem.indexOf(u8, context.payloads[0].?, "todo_slice") == null);
     try std.testing.expect(std.mem.indexOf(u8, context.payloads[1].?, "\"role\":\"tool\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, context.payloads[1].?, "hello from file") != null);
 
-    const events_path = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, ".var", "sessions", result.session_id, "events.jsonl" });
+    const events_path = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ workspace_root, ".var", "sessions", result.session_id, "events.jsonl" });
     defer std.testing.allocator.free(events_path);
-    const events = try VAR1.fsutil.readTextAlloc(std.testing.allocator, events_path);
+    const events = try VAR1.shared.fsutil.readTextAlloc(std.testing.allocator, events_path);
     defer std.testing.allocator.free(events);
 
     try std.testing.expect(std.mem.indexOf(u8, events, "tool_requested") != null);
@@ -612,9 +543,9 @@ test "loop enforces the step budget when tool use does not conclude in time" {
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    const file_path = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, "context.txt" });
+    const file_path = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ workspace_root, "context.txt" });
     defer std.testing.allocator.free(file_path);
-    try VAR1.fsutil.writeText(file_path, "hello from file\n");
+    try VAR1.shared.fsutil.writeText(file_path, "hello from file\n");
 
     const config = try makeConfig(std.testing.allocator, workspace_root, 1);
     defer config.deinit(std.testing.allocator);
@@ -622,7 +553,7 @@ test "loop enforces the step budget when tool use does not conclude in time" {
     var context = ToolLoopContext{ .allocator = std.testing.allocator };
     defer context.deinit();
 
-    try std.testing.expectError(VAR1.loop.Error.StepLimitExceeded, VAR1.loop.runPromptWithTransport(std.testing.allocator, config, "Read context.txt and tell me the first line.", .{
+    try std.testing.expectError(VAR1.core.executor.Error.StepLimitExceeded, VAR1.core.executor.runPromptWithTransport(std.testing.allocator, config, "Read context.txt and tell me the first line.", .{
         .context = &context,
         .sendFn = mockSendToolLoop,
     }));

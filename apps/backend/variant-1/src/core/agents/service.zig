@@ -1,9 +1,9 @@
 const std = @import("std");
-const docs_sync = @import("docs_sync.zig");
-const fsutil = @import("fsutil.zig");
-const store = @import("store.zig");
-const tools = @import("tools.zig");
-const types = @import("types.zig");
+const docs_sync = @import("../docs/sync.zig");
+const fsutil = @import("../../shared/fsutil.zig");
+const store = @import("../sessions/store.zig");
+const tools = @import("../tools/runtime.zig");
+const types = @import("../../shared/types.zig");
 
 pub const Error = error{
     AgentNameTaken,

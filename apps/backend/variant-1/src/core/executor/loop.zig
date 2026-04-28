@@ -1,10 +1,10 @@
 const std = @import("std");
-const docs_sync = @import("docs_sync.zig");
-const context_builder = @import("core/context/index.zig");
-const provider = @import("provider.zig");
-const store = @import("store.zig");
-const tools = @import("tools.zig");
-const types = @import("types.zig");
+const docs_sync = @import("../docs/sync.zig");
+const context_builder = @import("../context/index.zig");
+const provider = @import("../providers/openai_compatible.zig");
+const store = @import("../sessions/store.zig");
+const tools = @import("../tools/runtime.zig");
+const types = @import("../../shared/types.zig");
 
 pub const Error = error{
     Cancelled,
@@ -110,7 +110,7 @@ pub fn runPromptWithOptions(
         options.hooks,
         session.id,
         "session_started",
-        "Harness session initialized.",
+        "VAR1 session initialized.",
         session.status,
     );
     try docs_sync.writePending(allocator, config.workspace_root, .{
@@ -133,8 +133,8 @@ pub fn runPromptWithOptions(
     if (execution_context.parent_session_id == null) {
         execution_context.parent_session_id = session.id;
     }
-    if (!execution_context.harness_tools_enabled and tools.harnessToolsRelevant(session.prompt)) {
-        execution_context.harness_tools_enabled = true;
+    if (!execution_context.workspace_state_enabled and tools.workspaceStateRelevant(session.prompt)) {
+        execution_context.workspace_state_enabled = true;
     }
 
     const system_prompt = try tools.buildAgentSystemPrompt(allocator, execution_context);
@@ -148,7 +148,7 @@ pub fn runPromptWithOptions(
 
     var requires_child_supervision = false;
     var step: usize = 0;
-    while (step < config.harness_max_steps) : (step += 1) {
+    while (step < config.max_steps) : (step += 1) {
         if (options.hooks.shouldCancel(session.id)) {
             try cancelSession(allocator, config.workspace_root, options.hooks, &session, "Cancellation requested.");
             return Error.Cancelled;
@@ -404,7 +404,7 @@ fn sanitizeOperatorResponse(
     }
 
     allocator.free(redacted);
-    return allocator.dupe(u8, "I completed the task and can provide an operator-safe summary.");
+    return allocator.dupe(u8, "I completed the request and can provide an operator-safe summary.");
 }
 
 fn promptRequestsToolDocumentation(prompt: []const u8) bool {

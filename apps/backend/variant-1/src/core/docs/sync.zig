@@ -1,6 +1,6 @@
 const std = @import("std");
-const fsutil = @import("fsutil.zig");
-const types = @import("types.zig");
+const fsutil = @import("../../shared/fsutil.zig");
+const types = @import("../../shared/types.zig");
 
 // TODO: Keep .var process tracking as a hard gate for progress visibility.
 
@@ -8,7 +8,7 @@ pub fn ensureRunStart(allocator: std.mem.Allocator, workspace_root: []const u8) 
     const log_path = try runLogPath(allocator, workspace_root);
     defer allocator.free(log_path);
     if (!fsutil.fileExists(log_path)) {
-        try fsutil.writeText(log_path, "# VAR1 Harness Changelog Log\n\n");
+        try fsutil.writeText(log_path, "# VAR1 Changelog Log\n\n");
     }
 
     const log_contents = try fsutil.readTextAlloc(allocator, log_path);
@@ -123,8 +123,4 @@ fn renderSessionDoc(allocator: std.mem.Allocator, snapshot: types.ProgressSnapsh
             blockers,
         },
     );
-}
-
-pub fn completeTask(allocator: std.mem.Allocator, workspace_root: []const u8, snapshot: types.ProgressSnapshot) !void {
-    return completeSession(allocator, workspace_root, snapshot);
 }

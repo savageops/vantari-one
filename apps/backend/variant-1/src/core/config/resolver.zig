@@ -1,7 +1,7 @@
 const std = @import("std");
-const auth_resolver = @import("auth_resolver.zig");
-const fsutil = @import("fsutil.zig");
-const types = @import("types.zig");
+const auth_resolver = @import("../auth/resolver.zig");
+const fsutil = @import("../../shared/fsutil.zig");
+const types = @import("../../shared/types.zig");
 
 // TODO: Replace the manual env parsing with a fuller parser only if the simple `.env` contract becomes insufficient.
 
@@ -18,7 +18,7 @@ pub fn loadFromEnvFile(allocator: std.mem.Allocator, env_path: []const u8) !type
     var openai_api_key: ?[]u8 = null;
     var openai_model: ?[]u8 = null;
     var workspace_root: ?[]u8 = null;
-    var harness_max_steps: usize = 1;
+    var max_steps: usize = 1;
 
     errdefer if (openai_base_url) |value| allocator.free(value);
     errdefer if (openai_api_key) |value| allocator.free(value);
@@ -47,7 +47,7 @@ pub fn loadFromEnvFile(allocator: std.mem.Allocator, env_path: []const u8) !type
         } else if (std.mem.eql(u8, key, "WORKSPACE")) {
             workspace_root = try dupeReplacing(allocator, workspace_root, value);
         } else if (std.mem.eql(u8, key, "MAX_STEPS")) {
-            harness_max_steps = std.fmt.parseInt(usize, value, 10) catch return Error.InvalidValue;
+            max_steps = std.fmt.parseInt(usize, value, 10) catch return Error.InvalidValue;
         }
     }
 
@@ -63,7 +63,7 @@ pub fn loadFromEnvFile(allocator: std.mem.Allocator, env_path: []const u8) !type
         .auth_provider = try allocator.dupe(u8, provider_id),
         .subscription_plan_label = if (isZaiProvider(provider_id)) try allocator.dupe(u8, resolved_model) else null,
         .subscription_status = if (isZaiProvider(provider_id)) try allocator.dupe(u8, "active") else null,
-        .harness_max_steps = harness_max_steps,
+        .max_steps = max_steps,
         .workspace_root = workspace_root orelse try allocator.dupe(u8, "."),
     };
 }
@@ -115,7 +115,7 @@ fn loadDefaultFromAuthOnly(allocator: std.mem.Allocator, workspace_root: []const
         .auth_provider = try allocator.dupe(u8, resolved_auth.provider_id),
         .subscription_plan_label = if (resolved_auth.subscription_plan_label) |value| try allocator.dupe(u8, value) else null,
         .subscription_status = if (resolved_auth.subscription_status) |value| try allocator.dupe(u8, value) else null,
-        .harness_max_steps = 1,
+        .max_steps = 1,
         .workspace_root = canonical_workspace_root,
     };
 }

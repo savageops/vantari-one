@@ -1,5 +1,5 @@
 const std = @import("std");
-const auth_store = @import("auth_store.zig");
+const auth_store = @import("store.zig");
 
 pub const AuthBootstrap = auth_store.AuthBootstrap;
 pub const ResolvedAuth = auth_store.ResolvedAuth;

@@ -14,8 +14,8 @@ const MockSession = struct {
     failure_reason: ?[]u8 = null,
     created_at_ms: i64,
     updated_at_ms: i64,
-    messages: std.array_list.Managed(VAR1.types.SessionMessage),
-    events: std.array_list.Managed(VAR1.types.SessionEvent),
+    messages: std.array_list.Managed(VAR1.shared.types.SessionMessage),
+    events: std.array_list.Managed(VAR1.shared.types.SessionEvent),
 
     fn init(allocator: std.mem.Allocator, session_id: []const u8, prompt: []const u8, status: []const u8) !MockSession {
         const now_ms = std.time.milliTimestamp();
@@ -26,8 +26,8 @@ const MockSession = struct {
             .prompt = try allocator.dupe(u8, prompt),
             .created_at_ms = now_ms,
             .updated_at_ms = now_ms,
-            .messages = std.array_list.Managed(VAR1.types.SessionMessage).init(allocator),
-            .events = std.array_list.Managed(VAR1.types.SessionEvent).init(allocator),
+            .messages = std.array_list.Managed(VAR1.shared.types.SessionMessage).init(allocator),
+            .events = std.array_list.Managed(VAR1.shared.types.SessionEvent).init(allocator),
         };
         try session.messages.append(.{
             .id = try allocator.dupe(u8, "msg-1"),
@@ -170,7 +170,7 @@ const MockKernelContext = struct {
         var session = try MockSession.init(self.allocator, session_id, prompt, "initialized");
         try session.events.append(.{
             .event_type = try self.allocator.dupe(u8, "session_started"),
-            .message = try self.allocator.dupe(u8, "Harness session initialized."),
+            .message = try self.allocator.dupe(u8, "VAR1 session initialized."),
             .timestamp_ms = session.created_at_ms,
         });
         try self.sessions.append(session);
@@ -189,11 +189,11 @@ fn mockKernelCall(
     allocator: std.mem.Allocator,
     method: []const u8,
     params_json: []const u8,
-) anyerror!VAR1.stdio_rpc.RpcCallResult {
+) anyerror!VAR1.host.stdio_rpc.RpcCallResult {
     var ctx: *MockKernelContext = @ptrCast(@alignCast(ctx_ptr.?));
     try ctx.recordCall(method, params_json);
 
-    if (std.mem.eql(u8, method, VAR1.protocol_types.methods.health_get)) {
+    if (std.mem.eql(u8, method, VAR1.shared.protocol.types.methods.health_get)) {
         return .{
             .result_json = try renderJsonAlloc(allocator, .{
                 .ok = true,
@@ -204,8 +204,8 @@ fn mockKernelCall(
         };
     }
 
-    if (std.mem.eql(u8, method, VAR1.protocol_types.methods.session_list)) {
-        var summaries = try allocator.alloc(VAR1.protocol_types.SessionSummary, ctx.sessions.items.len);
+    if (std.mem.eql(u8, method, VAR1.shared.protocol.types.methods.session_list)) {
+        var summaries = try allocator.alloc(VAR1.shared.protocol.types.SessionSummary, ctx.sessions.items.len);
         defer allocator.free(summaries);
 
         for (ctx.sessions.items, 0..) |session, index| {
@@ -219,7 +219,7 @@ fn mockKernelCall(
         };
     }
 
-    if (std.mem.eql(u8, method, VAR1.protocol_types.methods.session_get)) {
+    if (std.mem.eql(u8, method, VAR1.shared.protocol.types.methods.session_get)) {
         const Args = struct {
             session_id: []const u8,
         };
@@ -242,7 +242,7 @@ fn mockKernelCall(
         };
     }
 
-    if (std.mem.eql(u8, method, VAR1.protocol_types.methods.session_create)) {
+    if (std.mem.eql(u8, method, VAR1.shared.protocol.types.methods.session_create)) {
         const Args = struct {
             prompt: []const u8,
         };
@@ -252,7 +252,7 @@ fn mockKernelCall(
         });
         defer parsed.deinit();
 
-        const session_id = try std.fmt.allocPrint(ctx.allocator, "task-created-{d}", .{ctx.next_session_number});
+        const session_id = try std.fmt.allocPrint(ctx.allocator, "session-created-{d}", .{ctx.next_session_number});
         ctx.next_session_number += 1;
 
         const session = try MockSession.init(ctx.allocator, session_id, parsed.value.prompt, "initialized");
@@ -266,7 +266,7 @@ fn mockKernelCall(
         };
     }
 
-    if (std.mem.eql(u8, method, VAR1.protocol_types.methods.session_send)) {
+    if (std.mem.eql(u8, method, VAR1.shared.protocol.types.methods.session_send)) {
         const Args = struct {
             session_id: []const u8,
             prompt: ?[]const u8 = null,
@@ -284,7 +284,7 @@ fn mockKernelCall(
         if (session.events.items.len == 0) {
             try session.events.append(.{
                 .event_type = try ctx.allocator.dupe(u8, "session_started"),
-                .message = try ctx.allocator.dupe(u8, "Harness session initialized."),
+                .message = try ctx.allocator.dupe(u8, "VAR1 session initialized."),
                 .timestamp_ms = std.time.milliTimestamp(),
             });
         }
@@ -307,7 +307,7 @@ fn mockWaitNotificationAfter(
     allocator: std.mem.Allocator,
     after_sequence: u64,
     _: usize,
-) anyerror!?VAR1.stdio_rpc.Notification {
+) anyerror!?VAR1.host.stdio_rpc.Notification {
     const ctx: *MockKernelContext = @ptrCast(@alignCast(ctx_ptr.?));
     const notification = ctx.notification orelse return null;
     if (notification.sequence <= after_sequence) return null;
@@ -319,7 +319,7 @@ fn mockWaitNotificationAfter(
     };
 }
 
-fn makeSummary(session: MockSession) VAR1.protocol_types.SessionSummary {
+fn makeSummary(session: MockSession) VAR1.shared.protocol.types.SessionSummary {
     return .{
         .session_id = session.session_id,
         .status = session.status,
@@ -335,8 +335,8 @@ fn makeSummary(session: MockSession) VAR1.protocol_types.SessionSummary {
     };
 }
 
-fn makeBridge(allocator: std.mem.Allocator, ctx: *MockKernelContext) VAR1.web.Bridge {
-    return VAR1.web.Bridge.initWithKernel(allocator, .{
+fn makeBridge(allocator: std.mem.Allocator, ctx: *MockKernelContext) VAR1.host.http_bridge.Bridge {
+    return VAR1.host.http_bridge.Bridge.initWithKernel(allocator, .{
         .context = ctx,
         .callFn = mockKernelCall,
         .waitNotificationAfterFn = mockWaitNotificationAfter,
@@ -354,7 +354,7 @@ test "web route exposes bridge root text instead of embedded workbench html" {
     defer ctx.deinit();
     var bridge = makeBridge(std.testing.allocator, &ctx);
 
-    const response = try VAR1.web.route(
+    const response = try VAR1.host.http_bridge.route(
         std.testing.allocator,
         &bridge,
         .GET,
@@ -374,7 +374,7 @@ test "web route forwards json-rpc payloads and preserves caller ids" {
     defer ctx.deinit();
     var bridge = makeBridge(std.testing.allocator, &ctx);
 
-    const response = try VAR1.web.route(
+    const response = try VAR1.host.http_bridge.route(
         std.testing.allocator,
         &bridge,
         .POST,
@@ -395,12 +395,12 @@ test "web route renders session notifications as sse snapshots" {
     defer ctx.deinit();
     try ctx.setNotification(
         4,
-        VAR1.protocol_types.notification_methods.session_event,
-        "{\"session_id\":\"task-1\",\"event_type\":\"assistant_response\",\"message\":\"3\"}",
+        VAR1.shared.protocol.types.notification_methods.session_event,
+        "{\"session_id\":\"session-1\",\"event_type\":\"assistant_response\",\"message\":\"3\"}",
     );
     var bridge = makeBridge(std.testing.allocator, &ctx);
 
-    const response = try VAR1.web.route(
+    const response = try VAR1.host.http_bridge.route(
         std.testing.allocator,
         &bridge,
         .GET,
@@ -413,21 +413,15 @@ test "web route renders session notifications as sse snapshots" {
     try std.testing.expectEqualStrings("text/event-stream; charset=utf-8", response.content_type);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "id: 4") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "event: session/event") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"session_id\":\"task-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"session_id\":\"session-1\"") != null);
 }
 
-test "web compatibility routes map onto the session-native bridge contract" {
+test "web route rejects removed api facade" {
     var ctx = MockKernelContext.init(std.testing.allocator);
     defer ctx.deinit();
-    try ctx.seedCompletedSession(
-        "task-existing",
-        "What is stored here?",
-        "Canonical session files are stored under .var/sessions.",
-    );
-    try ctx.seedInitializedSession("task-pending", "Count the lowercase letter r in strawberry.");
     var bridge = makeBridge(std.testing.allocator, &ctx);
 
-    const health_response = try VAR1.web.route(
+    const health_response = try VAR1.host.http_bridge.route(
         std.testing.allocator,
         &bridge,
         .GET,
@@ -437,83 +431,25 @@ test "web compatibility routes map onto the session-native bridge contract" {
     defer health_response.deinit(std.testing.allocator);
     try std.testing.expect(std.mem.indexOf(u8, health_response.body, "\"model\":\"gemma-4-26b-a4b-it-apex\"") != null);
 
-    const list_response = try VAR1.web.route(
+    const root_response = try VAR1.host.http_bridge.route(
         std.testing.allocator,
         &bridge,
         .GET,
         "/api/tasks",
         "",
     );
-    defer list_response.deinit(std.testing.allocator);
-    try std.testing.expect(std.mem.indexOf(u8, list_response.body, "\"id\":\"task-existing\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, list_response.body, "\"answer\":\"Canonical session files are stored under .var/sessions.\"") != null);
+    defer root_response.deinit(std.testing.allocator);
+    try std.testing.expectEqual(std.http.Status.not_found, root_response.status);
+    try std.testing.expect(std.mem.indexOf(u8, root_response.body, "\"error\":\"NotFound\"") != null);
 
-    const create_response = try VAR1.web.route(
+    const nested_response = try VAR1.host.http_bridge.route(
         std.testing.allocator,
         &bridge,
         .POST,
-        "/api/tasks",
-        "{\"prompt\":\"Count the lowercase letter r in strawberry.\"}",
-    );
-    defer create_response.deinit(std.testing.allocator);
-    try std.testing.expectEqual(std.http.Status.created, create_response.status);
-    try std.testing.expect(std.mem.indexOf(u8, create_response.body, "\"status\":\"completed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, create_response.body, "\"answer\":\"3\"") != null);
-
-    const detail_response = try VAR1.web.route(
-        std.testing.allocator,
-        &bridge,
-        .GET,
-        "/api/tasks/task-existing",
+        "/api/tasks/session-existing/messages",
         "",
     );
-    defer detail_response.deinit(std.testing.allocator);
-    try std.testing.expect(std.mem.indexOf(u8, detail_response.body, "\"id\":\"task-existing\"") != null);
-
-    const journal_response = try VAR1.web.route(
-        std.testing.allocator,
-        &bridge,
-        .GET,
-        "/api/tasks/task-existing/journal",
-        "",
-    );
-    defer journal_response.deinit(std.testing.allocator);
-    try std.testing.expect(std.mem.indexOf(u8, journal_response.body, "assistant_response") != null);
-
-    const message_response = try VAR1.web.route(
-        std.testing.allocator,
-        &bridge,
-        .POST,
-        "/api/tasks/task-existing/messages",
-        "{\"prompt\":\"Tell me more.\"}",
-    );
-    defer message_response.deinit(std.testing.allocator);
-    try std.testing.expectEqual(std.http.Status.ok, message_response.status);
-    try std.testing.expect(std.mem.indexOf(u8, message_response.body, "\"id\":\"task-existing\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, message_response.body, "\"answer\":\"3\"") != null);
-
-    const turns_response = try VAR1.web.route(
-        std.testing.allocator,
-        &bridge,
-        .GET,
-        "/api/tasks/task-existing/turns",
-        "",
-    );
-    defer turns_response.deinit(std.testing.allocator);
-    try std.testing.expect(std.mem.indexOf(u8, turns_response.body, "What is stored here?") != null);
-    try std.testing.expect(std.mem.indexOf(u8, turns_response.body, "Canonical session files are stored under .var/sessions.") != null);
-    try std.testing.expect(std.mem.indexOf(u8, turns_response.body, "Tell me more.") != null);
-
-    const resume_response = try VAR1.web.route(
-        std.testing.allocator,
-        &bridge,
-        .POST,
-        "/api/tasks/task-pending/resume",
-        "",
-    );
-    defer resume_response.deinit(std.testing.allocator);
-    try std.testing.expectEqual(std.http.Status.ok, resume_response.status);
-    try std.testing.expect(std.mem.indexOf(u8, resume_response.body, "\"id\":\"task-pending\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, resume_response.body, "\"status\":\"completed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, resume_response.body, "\"answer\":\"3\"") != null);
+    defer nested_response.deinit(std.testing.allocator);
+    try std.testing.expectEqual(std.http.Status.not_found, nested_response.status);
+    try std.testing.expect(std.mem.indexOf(u8, nested_response.body, "\"error\":\"NotFound\"") != null);
 }

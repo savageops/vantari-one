@@ -11,30 +11,31 @@ This is the canonical architecture map for the current `VAR1` runtime.
 - one executable name: `VAR1`
 - one hidden host mode: `kernel-stdio`
 - one external browser client: `apps/frontend/var1-client`
-- temporary `/api/tasks*` compatibility exists only at the HTTP bridge edge
 
 ## Runtime slice
 
 ```mermaid
 flowchart TB
-  cli["VAR1 CLI"] --> client["src/cli.zig"]
-  browser["apps/frontend/var1-client"] --> bridge["src/web.zig"]
+  cli["VAR1 CLI"] --> client["src/clients/cli.zig"]
+  browser["apps/frontend/var1-client"] --> bridge["src/host/http_bridge.zig"]
 
   client --> rpcClient["Local stdio RPC client"]
   rpcClient --> kernel["VAR1 kernel-stdio"]
   bridge --> kernel
 
-  kernel --> host["src/stdio_rpc.zig"]
-  host --> executor["src/loop.zig"]
+  kernel --> host["src/host/stdio_rpc.zig"]
+  host --> executor["src/core/executor/loop.zig"]
+  host --> compactor["src/core/context/compactor.zig"]
   executor --> context["src/core/context/builder.zig"]
-  executor --> store["src/store.zig"]
-  executor --> provider["src/provider.zig"]
-  executor --> tools["src/tools.zig"]
-  tools --> agents["src/agents.zig"]
-  tools --> harness["src/harness_tools.zig"]
-  executor --> docs["src/docs_sync.zig"]
+  executor --> store["src/core/sessions/store.zig"]
+  executor --> provider["src/core/providers/openai_compatible.zig"]
+  executor --> tools["src/core/tools/runtime.zig"]
+  tools --> agents["src/core/agents/service.zig"]
+  tools --> workspaceState["src/core/tools/workspace_runtime.zig"]
+  executor --> docs["src/core/docs/sync.zig"]
 
   context --> store
+  compactor --> store
   store --> sessionRoot[".var/sessions/<id>/session.json + messages.jsonl + context.jsonl + events.jsonl + output.txt"]
   docs --> processRoot[".var/todos + .var/changelog + .var/memories"]
 ```
@@ -68,6 +69,56 @@ sequenceDiagram
   B-->>C: response or UI refresh
 ```
 
+## Session compaction flow
+
+```mermaid
+sequenceDiagram
+  actor C as Client
+  participant B as Bridge or CLI
+  participant K as kernel-stdio
+  participant M as context compactor
+  participant S as store.zig
+  participant X as context builder
+
+  C->>B: session/compact
+  B->>K: JSON-RPC request
+  K->>M: compact session by stable seq entry/range
+  M->>S: read session + messages + latest checkpoint
+  M->>M: plan next segment or higher-aggression recompact
+  M->>S: append summary checkpoint to context.jsonl
+  K-->>B: compacted checkpoint metadata
+  B-->>C: JSON-RPC response
+  X->>S: later reads latest checkpoint plus raw suffix
+```
+
+## Tool initialization flow
+
+```mermaid
+sequenceDiagram
+  participant C as CLI or RPC client
+  participant H as host/stdio_rpc.zig
+  participant L as core/executor/loop.zig
+  participant T as core/tools/runtime.zig
+  participant P as core/providers/openai_compatible.zig
+  participant I as iex executable
+
+  C->>H: tools/list or session/send
+  H->>T: renderCatalogJson or execution context
+  T-->>H: built-in ToolDefinition catalog
+  L->>T: builtinDefinitionsForContext(execution_context)
+  T-->>L: context-filtered tool definitions
+  L->>P: provider request with function schemas
+  P-->>L: assistant tool call
+  L->>T: execute(tool_call)
+  T->>I: search_files invokes iex search --json
+  I-->>T: JSON hits
+  T-->>L: tool result envelope
+```
+
+Tool definitions are schema-first. The current repeated shape lives in `shared/types.zig` as `ToolDefinition { name, description, parameters_json, example_json, usage_hint }`. Provider request construction, CLI catalog export, RPC catalog export, and failure repair hints all derive from that single metadata surface.
+
+`search_files` is the content-search tool. It resolves the workspace path in Zig, then invokes `iex search --json --max-hits ...` through the command-runner boundary. `list_files` is the native Zig path-discovery tool and does not shell to `iex`. Installing `VAR1` therefore requires a real `iex` executable for content search; the current binary does not embed or install `iex` by itself.
+
 ## Session state machine
 
 ```mermaid
@@ -94,62 +145,48 @@ Every session directory contains:
 - `events.jsonl`
 - `output.txt`
 
-`messages.jsonl` is the complete append-only transcript. `context.jsonl` is a compact checkpoint ledger used by the context builder to create model-visible history without rewriting transcript history.
+`messages.jsonl` is the complete append-only transcript. `context.jsonl` is a compact checkpoint ledger written by the context compactor and used by the context builder to create model-visible history without rewriting transcript history. Each checkpoint marks the covered source sequence range, the next raw `first_kept_seq`, `compacted_entry_count`, and `aggressiveness_milli`, so compaction can advance one JSONL entry at a time or recompact an existing range when a stronger slider value is requested.
 
-`store.ensureStoreReady(...)` upgrades legacy layouts before normal execution:
-
-- `.harness/tasks/<id>/task.json` -> `.var/sessions/<id>/session.json`
-- `turns.jsonl` -> `messages.jsonl`
-- `journal.jsonl` -> `events.jsonl`
-- `answer.txt` -> `output.txt`
-
-Legacy ids such as `task-...` remain valid as opaque session ids.
+`store.ensureStoreReady(...)` validates and rewrites existing `.var/sessions/<id>/session.json` records into the current canonical shape. It does not read old roots, old-layout files, or old-layout fields.
 
 ## Module ownership
 
-- `src/types.zig`
+- `src/shared/types.zig`
   shared runtime types and session contracts
-- `src/store.zig`
-  canonical session storage plus one-time migration
-- `src/loop.zig`
+- `src/core/sessions/store.zig`
+  canonical session storage
+- `src/core/executor/loop.zig`
   kernel-owned execution loop
 - `src/core/context/builder.zig`
   sole owner for turning session storage into provider-ready transcript messages
+- `src/core/context/compactor.zig`
+  sole owner for planning and writing manual summary checkpoints from stable message sequence entries/ranges
 - `src/core/tools/`
-  typed tool socket namespace and validation facade around the current tool runtime
+  typed tool socket namespace, built-in tool registry/runtime, command-backed search dispatch, and workspace-state helpers
 - `src/core/plugins/`
   plugin manifest/socket contracts only; plugin implementations do not live in core
-- `src/protocol_types.zig`
+- `src/shared/protocol/types.zig`
   JSON-RPC methods and payload shapes
-- `src/stdio_rpc.zig`
+- `src/host/stdio_rpc.zig`
   Content-Length framed stdio host and local child-process client
-- `src/web.zig`
-  HTTP bridge plus temporary task-facade translation
-- `src/cli.zig`
+- `src/host/http_bridge.zig`
+  HTTP bridge for `/rpc`, `/events`, and `/api/health`
+- `src/clients/cli.zig`
   thin protocol-backed CLI
 - `apps/frontend/var1-client`
   external static browser client over `/rpc` and `/events`
-
-## Compatibility boundary
-
-The bridge still exposes `/api/tasks*` for one wave, but only as translation:
-
-- `task` in compatibility responses maps to `session`
-- `answer` maps to `output`
-- `turns` maps to `messages`
-- `journal` maps to `events`
-
-No task-native execution logic remains in the kernel.
 
 ## Pluggability boundary
 
 `core/` contains kernel capability domains, not plugin names. The current socket hierarchy is intentionally small:
 
-- `core/context/` owns model-visible transcript assembly.
+- `core/context/` owns model-visible transcript assembly and manual checkpoint generation.
 - `core/tools/` owns tool socket contracts and delegates to the current runtime body.
 - `core/plugins/` owns manifest validation for future plugin roots.
 
 Future plugin implementations should live outside `core/` and register through typed sockets. Auto-discovery is not enabled until manifest validation, explicit enablement, deterministic load order, and lifecycle tests are in place.
+
+The next durable tool slice is a per-tool module registry with explicit availability metadata. Command-backed tools such as `search_files` should report the external executable dependency rather than relying on late process-spawn failure as the first availability signal.
 
 ## Validation lane
 
@@ -160,7 +197,7 @@ The current validation lane should always prove these slices together:
 - direct `run`
 - delegated child-session `run`
 - bridge root response is text, not embedded HTML
-- bridge task-facade routes still work
+- bridge rejects removed facade routes
 - external client exists at `apps/frontend/var1-client`
 
 Latest local Windows validation on 2026-04-28:

@@ -17,28 +17,28 @@ test "cli resolvePromptInput reads prompt files and trims trailing newlines" {
     );
     defer std.testing.allocator.free(prompt_path);
 
-    const prompt = try VAR1.cli.resolvePromptInput(std.testing.allocator, null, prompt_path);
+    const prompt = try VAR1.clients.cli.resolvePromptInput(std.testing.allocator, null, prompt_path);
     defer std.testing.allocator.free(prompt);
 
     try std.testing.expectEqualStrings("Count the lowercase letter r in strawberry.", prompt);
 }
 
 test "cli resolvePromptInput prefers inline prompt when present" {
-    const prompt = try VAR1.cli.resolvePromptInput(std.testing.allocator, "inline prompt", null);
+    const prompt = try VAR1.clients.cli.resolvePromptInput(std.testing.allocator, "inline prompt", null);
     defer std.testing.allocator.free(prompt);
 
     try std.testing.expectEqualStrings("inline prompt", prompt);
 }
 
 test "cli resolvePromptInput returns empty prompt for resume-only runs" {
-    const prompt = try VAR1.cli.resolvePromptInput(std.testing.allocator, null, null);
+    const prompt = try VAR1.clients.cli.resolvePromptInput(std.testing.allocator, null, null);
     defer std.testing.allocator.free(prompt);
 
     try std.testing.expectEqualStrings("", prompt);
 }
 
 test "cli root help advertises command discovery and tools json export" {
-    const help = VAR1.cli.helpText(null).?;
+    const help = VAR1.clients.cli.helpText(null).?;
 
     try std.testing.expect(std.mem.indexOf(u8, help, "VAR1 <command> [flags]") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "VAR1 health") != null);
@@ -46,8 +46,8 @@ test "cli root help advertises command discovery and tools json export" {
     try std.testing.expect(std.mem.indexOf(u8, help, "VAR1 help <command>") != null);
 }
 
-test "cli run help documents prompt-source exclusivity and task resume semantics" {
-    const help = VAR1.cli.helpText("run").?;
+test "cli run help documents prompt-source exclusivity and session resume semantics" {
+    const help = VAR1.clients.cli.helpText("run").?;
 
     try std.testing.expect(std.mem.indexOf(u8, help, "--prompt-file <path>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "--session-id <session-id>") != null);
@@ -56,15 +56,15 @@ test "cli run help documents prompt-source exclusivity and task resume semantics
 }
 
 test "cli tools help documents schema fields" {
-    const help = VAR1.cli.helpText("tools").?;
+    const help = VAR1.clients.cli.helpText("tools").?;
 
     try std.testing.expect(std.mem.indexOf(u8, help, "\"parameters_schema\": { ... }") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "\"contract_example\": { ... }") != null);
-    try std.testing.expect(std.mem.indexOf(u8, help, "Harness-domain tools remain relevance-gated") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "Workspace-state tools remain relevance-gated") != null);
 }
 
 test "cli health help documents config-only readiness output" {
-    const help = VAR1.cli.helpText("health").?;
+    const help = VAR1.clients.cli.helpText("health").?;
 
     try std.testing.expect(std.mem.indexOf(u8, help, "\"base_url\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "\"auth_provider\"") != null);
@@ -72,13 +72,11 @@ test "cli health help documents config-only readiness output" {
     try std.testing.expect(std.mem.indexOf(u8, help, "VAR1 health --json") != null);
 }
 
-test "cli serve help documents bridge and compatibility routes" {
-    const help = VAR1.cli.helpText("serve").?;
+test "cli serve help documents canonical bridge routes only" {
+    const help = VAR1.clients.cli.helpText("serve").?;
 
     try std.testing.expect(std.mem.indexOf(u8, help, "POST /rpc") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "GET  /events") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "GET  /api/health") != null);
-    try std.testing.expect(std.mem.indexOf(u8, help, "GET  /api/tasks/:id/turns") != null);
-    try std.testing.expect(std.mem.indexOf(u8, help, "POST /api/tasks/:id/messages") != null);
-    try std.testing.expect(std.mem.indexOf(u8, help, "POST /api/tasks/:id/resume") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "/api/tasks") == null);
 }

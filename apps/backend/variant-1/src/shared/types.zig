@@ -7,7 +7,7 @@ pub const Config = struct {
     auth_provider: ?[]u8 = null,
     subscription_plan_label: ?[]u8 = null,
     subscription_status: ?[]u8 = null,
-    harness_max_steps: usize,
+    max_steps: usize,
     workspace_root: []u8,
 
     pub fn deinit(self: Config, allocator: std.mem.Allocator) void {
@@ -131,6 +131,8 @@ pub const ContextCheckpoint = struct {
     first_kept_seq: u64,
     tokens_before_estimate: u64,
     tokens_after_estimate: u64,
+    aggressiveness_milli: u16 = 350,
+    compacted_entry_count: u32 = 0,
     trigger: []u8,
     summary: []u8,
 

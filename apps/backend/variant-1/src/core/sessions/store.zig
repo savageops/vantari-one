@@ -1,6 +1,6 @@
 const std = @import("std");
-const fsutil = @import("fsutil.zig");
-const types = @import("types.zig");
+const fsutil = @import("../../shared/fsutil.zig");
+const types = @import("../../shared/types.zig");
 
 pub const InitSessionOptions = struct {
     status: types.SessionStatus = .initialized,
@@ -16,8 +16,6 @@ const ParsedSessionRecord = struct {
     status: []const u8,
     parent_session_id: ?[]const u8 = null,
     continued_from_session_id: ?[]const u8 = null,
-    parent_task_id: ?[]const u8 = null,
-    continued_from_task_id: ?[]const u8 = null,
     display_name: ?[]const u8 = null,
     agent_profile: ?[]const u8 = null,
     failure_reason: ?[]const u8 = null,
@@ -32,8 +30,8 @@ const ParsedSessionEvent = struct {
 };
 
 const ParsedSessionMessage = struct {
-    id: ?[]const u8 = null,
-    seq: ?u64 = null,
+    id: []const u8,
+    seq: u64,
     role: []const u8,
     content: []const u8,
     timestamp_ms: i64,
@@ -48,14 +46,13 @@ const ParsedContextCheckpoint = struct {
     first_kept_seq: u64,
     tokens_before_estimate: u64 = 0,
     tokens_after_estimate: u64 = 0,
+    aggressiveness_milli: u16 = 350,
+    compacted_entry_count: u32 = 0,
     trigger: []const u8,
     summary: []const u8,
 };
 
 pub fn ensureStoreReady(allocator: std.mem.Allocator, workspace_root: []const u8) !void {
-    try migrateLegacyRootIntoCanonical(allocator, workspace_root, ".harness", "tasks");
-    try migrateLegacyRootIntoCanonical(allocator, workspace_root, ".var", "tasks");
-
     const sessions_root = try sessionsRootPath(allocator, workspace_root);
     defer allocator.free(sessions_root);
 
@@ -70,7 +67,14 @@ pub fn ensureStoreReady(allocator: std.mem.Allocator, workspace_root: []const u8
     var iter = dir.iterate();
     while (try iter.next()) |entry| {
         if (entry.kind != .directory) continue;
-        try migrateSessionDirectory(allocator, workspace_root, entry.name);
+
+        const session_path = try sessionFilePath(allocator, workspace_root, entry.name);
+        defer allocator.free(session_path);
+        if (!fsutil.fileExists(session_path)) continue;
+
+        const session = try readSessionRecordRaw(allocator, session_path);
+        defer session.deinit(allocator);
+        try writeSessionRecord(allocator, workspace_root, session);
     }
 }
 
@@ -88,7 +92,7 @@ pub fn initSessionWithOptions(
 
     const now = std.time.milliTimestamp();
     const nonce = std.crypto.random.int(u64);
-    const id = try std.fmt.allocPrint(allocator, "task-{d}-{x}", .{ now, nonce });
+    const id = try std.fmt.allocPrint(allocator, "session-{d}-{x}", .{ now, nonce });
     errdefer allocator.free(id);
 
     const prompt_copy = try allocator.dupe(u8, prompt);
@@ -142,14 +146,8 @@ pub fn readSessionRecord(
         .id = try allocator.dupe(u8, parsed.value.id),
         .prompt = try allocator.dupe(u8, parsed.value.prompt),
         .status = try types.parseStatusLabel(parsed.value.status),
-        .parent_session_id = if (parsed.value.parent_session_id orelse parsed.value.parent_task_id) |value|
-            try allocator.dupe(u8, value)
-        else
-            null,
-        .continued_from_session_id = if (parsed.value.continued_from_session_id orelse parsed.value.continued_from_task_id) |value|
-            try allocator.dupe(u8, value)
-        else
-            null,
+        .parent_session_id = if (parsed.value.parent_session_id) |value| try allocator.dupe(u8, value) else null,
+        .continued_from_session_id = if (parsed.value.continued_from_session_id) |value| try allocator.dupe(u8, value) else null,
         .display_name = if (parsed.value.display_name) |value| try allocator.dupe(u8, value) else null,
         .agent_profile = if (parsed.value.agent_profile) |value| try allocator.dupe(u8, value) else null,
         .failure_reason = if (parsed.value.failure_reason) |value| try allocator.dupe(u8, value) else null,
@@ -339,13 +337,6 @@ pub fn readSessionMessages(
     workspace_root: []const u8,
     session_id: []const u8,
 ) ![]types.SessionMessage {
-    const session = try readSessionRecord(allocator, workspace_root, session_id);
-    defer session.deinit(allocator);
-
-    if (session.continued_from_session_id != null) {
-        return readLegacySessionMessages(allocator, workspace_root, session);
-    }
-
     const messages_path = try messagesFilePath(allocator, workspace_root, session_id);
     defer allocator.free(messages_path);
 
@@ -416,6 +407,8 @@ pub fn appendContextCheckpoint(
             .first_kept_seq = checkpoint.first_kept_seq,
             .tokens_before_estimate = checkpoint.tokens_before_estimate,
             .tokens_after_estimate = checkpoint.tokens_after_estimate,
+            .aggressiveness_milli = checkpoint.aggressiveness_milli,
+            .compacted_entry_count = checkpoint.compacted_entry_count,
             .trigger = checkpoint.trigger,
             .summary = checkpoint.summary,
         }, .{}),
@@ -465,6 +458,8 @@ pub fn readLatestContextCheckpoint(
                 .first_kept_seq = parsed.value.first_kept_seq,
                 .tokens_before_estimate = parsed.value.tokens_before_estimate,
                 .tokens_after_estimate = parsed.value.tokens_after_estimate,
+                .aggressiveness_milli = parsed.value.aggressiveness_milli,
+                .compacted_entry_count = parsed.value.compacted_entry_count,
                 .trigger = try allocator.dupe(u8, parsed.value.trigger),
                 .summary = try allocator.dupe(u8, parsed.value.summary),
             };
@@ -556,56 +551,6 @@ fn ensureInitialSessionMessage(
     try appendSessionMessage(allocator, workspace_root, session.id, .user, session.prompt, session.created_at_ms);
 }
 
-fn readLegacySessionMessages(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    session: types.SessionRecord,
-) ![]types.SessionMessage {
-    var messages = std.array_list.Managed(types.SessionMessage).init(allocator);
-    errdefer {
-        for (messages.items) |message| message.deinit(allocator);
-        messages.deinit();
-    }
-
-    try appendLegacySessionMessages(allocator, workspace_root, &messages, session);
-    return messages.toOwnedSlice();
-}
-
-fn appendLegacySessionMessages(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    messages: *std.array_list.Managed(types.SessionMessage),
-    session: types.SessionRecord,
-) !void {
-    if (session.continued_from_session_id) |previous_session_id| {
-        const previous_session = try readSessionRecord(allocator, workspace_root, previous_session_id);
-        defer previous_session.deinit(allocator);
-        try appendLegacySessionMessages(allocator, workspace_root, messages, previous_session);
-    }
-
-    try messages.append(.{
-        .id = try sessionMessageId(allocator, @as(u64, messages.items.len) + 1),
-        .seq = @as(u64, messages.items.len) + 1,
-        .role = .user,
-        .content = try allocator.dupe(u8, session.prompt),
-        .timestamp_ms = session.created_at_ms,
-    });
-
-    if (session.status == .completed) {
-        const output = try readOutput(allocator, workspace_root, session.id);
-        if (output) |value| {
-            defer allocator.free(value);
-            try messages.append(.{
-                .id = try sessionMessageId(allocator, @as(u64, messages.items.len) + 1),
-                .seq = @as(u64, messages.items.len) + 1,
-                .role = .assistant,
-                .content = try allocator.dupe(u8, value),
-                .timestamp_ms = session.updated_at_ms,
-            });
-        }
-    }
-}
-
 fn readSessionMessagesFromPath(
     allocator: std.mem.Allocator,
     messages_path: []const u8,
@@ -629,16 +574,9 @@ fn readSessionMessagesFromPath(
         }) catch continue;
         defer parsed.deinit();
 
-        const fallback_seq = @as(u64, messages.items.len) + 1;
-        const seq = parsed.value.seq orelse fallback_seq;
-        const id = if (parsed.value.id) |value|
-            try allocator.dupe(u8, value)
-        else
-            try sessionMessageId(allocator, seq);
-
         try messages.append(.{
-            .id = id,
-            .seq = seq,
+            .id = try allocator.dupe(u8, parsed.value.id),
+            .seq = parsed.value.seq,
             .role = try types.parseSessionMessageRole(parsed.value.role),
             .content = try allocator.dupe(u8, parsed.value.content),
             .timestamp_ms = parsed.value.timestamp_ms,
@@ -720,90 +658,6 @@ fn sessionMessageId(allocator: std.mem.Allocator, seq: u64) ![]u8 {
     return std.fmt.allocPrint(allocator, "msg-{d}", .{seq});
 }
 
-fn migrateLegacyRootIntoCanonical(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    parent_dir: []const u8,
-    child_dir: []const u8,
-) !void {
-    const legacy_root = try fsutil.join(allocator, &.{ workspace_root, parent_dir, child_dir });
-    defer allocator.free(legacy_root);
-
-    if (!fsutil.fileExists(legacy_root)) return;
-
-    const canonical_root = try sessionsRootPath(allocator, workspace_root);
-    defer allocator.free(canonical_root);
-
-    if (!fsutil.fileExists(canonical_root)) {
-        const canonical_parent = std.fs.path.dirname(canonical_root) orelse workspace_root;
-        try std.fs.cwd().makePath(canonical_parent);
-        try std.fs.cwd().rename(legacy_root, canonical_root);
-        return;
-    }
-
-    const legacy_root_abs = try fsutil.resolveAbsolute(allocator, legacy_root);
-    defer allocator.free(legacy_root_abs);
-
-    var dir = try std.fs.openDirAbsolute(legacy_root_abs, .{ .iterate = true });
-    defer dir.close();
-
-    var iter = dir.iterate();
-    while (try iter.next()) |entry| {
-        if (entry.kind != .directory) continue;
-
-        const old_path = try fsutil.join(allocator, &.{ legacy_root, entry.name });
-        defer allocator.free(old_path);
-        const new_path = try fsutil.join(allocator, &.{ canonical_root, entry.name });
-        defer allocator.free(new_path);
-
-        if (fsutil.fileExists(new_path)) continue;
-        try std.fs.cwd().rename(old_path, new_path);
-    }
-}
-
-fn migrateSessionDirectory(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    session_id: []const u8,
-) !void {
-    const session_dir = try sessionDirPath(allocator, workspace_root, session_id);
-    defer allocator.free(session_dir);
-
-    const legacy_task_json = try fsutil.join(allocator, &.{ session_dir, "task.json" });
-    defer allocator.free(legacy_task_json);
-    const canonical_session_json = try fsutil.join(allocator, &.{ session_dir, "session.json" });
-    defer allocator.free(canonical_session_json);
-
-    if (fsutil.fileExists(legacy_task_json) and !fsutil.fileExists(canonical_session_json)) {
-        try std.fs.cwd().rename(legacy_task_json, canonical_session_json);
-    }
-
-    if (fsutil.fileExists(canonical_session_json)) {
-        const session = try readSessionRecordRaw(allocator, canonical_session_json);
-        defer session.deinit(allocator);
-        try writeSessionRecord(allocator, workspace_root, session);
-    }
-
-    try migrateSidecarFile(allocator, session_dir, "turns.jsonl", "messages.jsonl");
-    try migrateSidecarFile(allocator, session_dir, "journal.jsonl", "events.jsonl");
-    try migrateSidecarFile(allocator, session_dir, "answer.txt", "output.txt");
-}
-
-fn migrateSidecarFile(
-    allocator: std.mem.Allocator,
-    session_dir: []const u8,
-    from_name: []const u8,
-    to_name: []const u8,
-) !void {
-    const from_path = try fsutil.join(allocator, &.{ session_dir, from_name });
-    defer allocator.free(from_path);
-    const to_path = try fsutil.join(allocator, &.{ session_dir, to_name });
-    defer allocator.free(to_path);
-
-    if (!fsutil.fileExists(from_path) or fsutil.fileExists(to_path)) return;
-    try std.fs.cwd().rename(from_path, to_path);
-}
-
 fn readSessionRecordRaw(
     allocator: std.mem.Allocator,
     session_path: []const u8,
@@ -820,167 +674,12 @@ fn readSessionRecordRaw(
         .id = try allocator.dupe(u8, parsed.value.id),
         .prompt = try allocator.dupe(u8, parsed.value.prompt),
         .status = try types.parseStatusLabel(parsed.value.status),
-        .parent_session_id = if (parsed.value.parent_session_id orelse parsed.value.parent_task_id) |value|
-            try allocator.dupe(u8, value)
-        else
-            null,
-        .continued_from_session_id = if (parsed.value.continued_from_session_id orelse parsed.value.continued_from_task_id) |value|
-            try allocator.dupe(u8, value)
-        else
-            null,
+        .parent_session_id = if (parsed.value.parent_session_id) |value| try allocator.dupe(u8, value) else null,
+        .continued_from_session_id = if (parsed.value.continued_from_session_id) |value| try allocator.dupe(u8, value) else null,
         .display_name = if (parsed.value.display_name) |value| try allocator.dupe(u8, value) else null,
         .agent_profile = if (parsed.value.agent_profile) |value| try allocator.dupe(u8, value) else null,
         .failure_reason = if (parsed.value.failure_reason) |value| try allocator.dupe(u8, value) else null,
         .created_at_ms = parsed.value.created_at_ms,
         .updated_at_ms = parsed.value.updated_at_ms,
     };
-}
-
-pub fn initTask(allocator: std.mem.Allocator, workspace_root: []const u8, prompt: []const u8) !types.SessionRecord {
-    return initSession(allocator, workspace_root, prompt);
-}
-
-pub const InitTaskOptions = InitSessionOptions;
-
-pub fn initTaskWithOptions(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    prompt: []const u8,
-    options: InitSessionOptions,
-) !types.SessionRecord {
-    return initSessionWithOptions(allocator, workspace_root, prompt, options);
-}
-
-pub fn readTaskRecord(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    task_id: []const u8,
-) !types.SessionRecord {
-    return readSessionRecord(allocator, workspace_root, task_id);
-}
-
-pub fn taskExists(allocator: std.mem.Allocator, workspace_root: []const u8, task_id: []const u8) !bool {
-    return sessionExists(allocator, workspace_root, task_id);
-}
-
-pub fn writeTaskRecord(allocator: std.mem.Allocator, workspace_root: []const u8, task: types.SessionRecord) !void {
-    return writeSessionRecord(allocator, workspace_root, task);
-}
-
-pub fn setTaskStatus(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    task: *types.SessionRecord,
-    status: types.SessionStatus,
-) !void {
-    return setSessionStatus(allocator, workspace_root, task, status);
-}
-
-pub fn setTaskPrompt(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    task: *types.SessionRecord,
-    prompt: []const u8,
-    status: types.SessionStatus,
-) !void {
-    return setSessionPrompt(allocator, workspace_root, task, prompt, status);
-}
-
-pub fn setTaskFailure(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    task: *types.SessionRecord,
-    failure_reason: []const u8,
-) !void {
-    return setSessionFailure(allocator, workspace_root, task, failure_reason);
-}
-
-pub fn appendJournal(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    task_id: []const u8,
-    event: types.SessionEvent,
-) !void {
-    return appendEvent(allocator, workspace_root, task_id, event);
-}
-
-pub fn readLatestJournalEvent(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    task_id: []const u8,
-) !?types.SessionEvent {
-    return readLatestEvent(allocator, workspace_root, task_id);
-}
-
-pub fn readJournalEvents(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    task_id: []const u8,
-) ![]types.SessionEvent {
-    return readEvents(allocator, workspace_root, task_id);
-}
-
-pub fn readConversationTurns(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    task_id: []const u8,
-) ![]types.SessionMessage {
-    return readSessionMessages(allocator, workspace_root, task_id);
-}
-
-pub fn appendConversationTurn(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    task_id: []const u8,
-    role: types.SessionMessageRole,
-    content: []const u8,
-    timestamp_ms: i64,
-) !void {
-    return appendSessionMessage(allocator, workspace_root, task_id, role, content, timestamp_ms);
-}
-
-pub fn upsertAssistantConversationTurn(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    task_id: []const u8,
-    content: []const u8,
-    timestamp_ms: i64,
-) !void {
-    return upsertAssistantSessionMessage(allocator, workspace_root, task_id, content, timestamp_ms);
-}
-
-pub fn listTaskRecords(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-) ![]types.SessionRecord {
-    return listSessionRecords(allocator, workspace_root);
-}
-
-pub fn writeFinalAnswer(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    task_id: []const u8,
-    answer: []const u8,
-) !void {
-    return writeOutput(allocator, workspace_root, task_id, answer);
-}
-
-pub fn readFinalAnswer(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    task_id: []const u8,
-) !?[]u8 {
-    return readOutput(allocator, workspace_root, task_id);
-}
-
-pub fn tasksRootPath(allocator: std.mem.Allocator, workspace_root: []const u8) ![]u8 {
-    return sessionsRootPath(allocator, workspace_root);
-}
-
-pub fn taskDirPath(allocator: std.mem.Allocator, workspace_root: []const u8, task_id: []const u8) ![]u8 {
-    return sessionDirPath(allocator, workspace_root, task_id);
-}
-
-pub fn taskFilePath(allocator: std.mem.Allocator, workspace_root: []const u8, task_id: []const u8) ![]u8 {
-    return sessionFilePath(allocator, workspace_root, task_id);
 }

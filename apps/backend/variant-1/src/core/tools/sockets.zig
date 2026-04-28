@@ -1,5 +1,5 @@
 const std = @import("std");
-const types = @import("../../types.zig");
+const types = @import("../../shared/types.zig");
 
 pub const Error = error{
     EmptyToolName,

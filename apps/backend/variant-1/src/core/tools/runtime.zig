@@ -1,7 +1,7 @@
 const std = @import("std");
-const fsutil = @import("fsutil.zig");
-const harness_tools = @import("harness_tools.zig");
-const types = @import("types.zig");
+const fsutil = @import("../../shared/fsutil.zig");
+const workspace_state_tools = @import("workspace_runtime.zig");
+const types = @import("../../shared/types.zig");
 
 // TODO: Keep the built-in tool surface small and high-signal.
 
@@ -115,7 +115,7 @@ pub const ExecutionContext = struct {
     workspace_root: []const u8,
     parent_session_id: ?[]const u8 = null,
     agent_service: ?AgentService = null,
-    harness_tools_enabled: bool = false,
+    workspace_state_enabled: bool = false,
 };
 
 const file_tool_definitions = [_]types.ToolDefinition{
@@ -169,7 +169,7 @@ const file_tool_definitions = [_]types.ToolDefinition{
         \\  "additionalProperties": false
         \\}
         ,
-        .example_json = "{\"path\":\"src/tools.zig\",\"start_line\":1,\"end_line\":80}",
+        .example_json = "{\"path\":\"src/core/tools/runtime.zig\",\"start_line\":1,\"end_line\":80}",
         .usage_hint = "Pass a file path, not a directory. Use list_files to discover paths and search_files to locate matching files first.",
     },
     .{
@@ -222,7 +222,7 @@ const file_tool_definitions = [_]types.ToolDefinition{
         \\  "additionalProperties": false
         \\}
         ,
-        .example_json = "{\"path\":\"src/tools.zig\",\"old_text\":\"alpha\",\"new_text\":\"beta\",\"replace_all\":false}",
+        .example_json = "{\"path\":\"src/core/tools/runtime.zig\",\"old_text\":\"alpha\",\"new_text\":\"beta\",\"replace_all\":false}",
         .usage_hint = "replace_in_file performs exact string replacement, not regex replacement. Read the file first when you need to confirm the current text.",
     },
 };
@@ -230,7 +230,7 @@ const file_tool_definitions = [_]types.ToolDefinition{
 const agent_tool_definitions = [_]types.ToolDefinition{
     .{
         .name = "launch_agent",
-        .description = "Launch another VAR1 agent as a named child run. JSON arguments require prompt and optionally accept name. Use this only for a bounded child task you want the harness to execute separately.",
+        .description = "Launch another VAR1 agent as a named child run. JSON arguments require prompt and optionally accept name. Use this only for bounded child work you want VAR1 to execute separately.",
         .parameters_json =
         \\{
         \\  "type": "object",
@@ -242,7 +242,7 @@ const agent_tool_definitions = [_]types.ToolDefinition{
         \\  "additionalProperties": false
         \\}
         ,
-        .example_json = "{\"prompt\":\"Inspect src/tools.zig and summarize search_files.\",\"name\":\"search-audit\"}",
+        .example_json = "{\"prompt\":\"Inspect src/core/tools/runtime.zig and summarize search_files.\",\"name\":\"search-audit\"}",
         .usage_hint = "Keep the child prompt bounded and self-contained. Use the returned name for agent_status or wait_agent.",
     },
     .{
@@ -280,7 +280,7 @@ const agent_tool_definitions = [_]types.ToolDefinition{
     },
     .{
         .name = "list_agents",
-        .description = "List the child agents launched by the current parent task, including their names and statuses. JSON arguments must be an empty object.",
+        .description = "List the child agents launched by the current parent session, including their names and statuses. JSON arguments must be an empty object.",
         .parameters_json =
         \\{
         \\  "type": "object",
@@ -293,32 +293,26 @@ const agent_tool_definitions = [_]types.ToolDefinition{
     },
 };
 
-const harness_tool_definitions = harness_tools.definitions;
-const file_plus_harness_tool_definitions = file_tool_definitions ++ harness_tool_definitions;
+const workspace_state_tool_definitions = workspace_state_tools.definitions;
+const file_plus_workspace_state_tool_definitions = file_tool_definitions ++ workspace_state_tool_definitions;
 const file_plus_agent_tool_definitions = file_tool_definitions ++ agent_tool_definitions;
-const all_tool_definitions = file_plus_harness_tool_definitions ++ agent_tool_definitions;
+const all_tool_definitions = file_plus_workspace_state_tool_definitions ++ agent_tool_definitions;
 
 fn toolDefinitionByName(tool_name: []const u8) ?types.ToolDefinition {
-    const lookup_name = canonicalToolName(tool_name);
     for (all_tool_definitions) |tool_definition| {
-        if (std.mem.eql(u8, tool_definition.name, lookup_name)) return tool_definition;
+        if (std.mem.eql(u8, tool_definition.name, tool_name)) return tool_definition;
     }
 
     return null;
 }
 
-fn canonicalToolName(tool_name: []const u8) []const u8 {
-    if (std.mem.eql(u8, tool_name, "rg_search")) return "search_files";
-    return tool_name;
-}
-
-pub fn harnessToolsRelevant(prompt: []const u8) bool {
+pub fn workspaceStateRelevant(prompt: []const u8) bool {
     const keywords = [_][]const u8{
         ".var",
-        "init_harness",
-        "harness_",
+        "init_workspace",
+        "workspace state",
         "todo slice",
-        "task record",
+        "session record",
         "changelog",
         "worktree",
         "backup",
@@ -340,8 +334,8 @@ pub fn builtinDefinitions(include_agent_tools: bool) []const types.ToolDefinitio
 }
 
 pub fn builtinDefinitionsForContext(execution_context: ExecutionContext) []const types.ToolDefinition {
-    if (execution_context.harness_tools_enabled) {
-        return if (execution_context.agent_service != null) all_tool_definitions[0..] else file_plus_harness_tool_definitions[0..];
+    if (execution_context.workspace_state_enabled) {
+        return if (execution_context.agent_service != null) all_tool_definitions[0..] else file_plus_workspace_state_tool_definitions[0..];
     }
 
     return builtinDefinitions(execution_context.agent_service != null);
@@ -412,19 +406,19 @@ pub fn renderCatalogJson(allocator: std.mem.Allocator, execution_context: Execut
 pub fn buildAgentSystemPrompt(allocator: std.mem.Allocator, execution_context: ExecutionContext) ![]u8 {
     const catalog = try renderCatalog(allocator, execution_context);
     defer allocator.free(catalog);
-    const harness_note = if (execution_context.harness_tools_enabled)
-        "Harness tools are enabled because this task is explicitly harness-related. Use init_harness only when the canonical structure is missing or incomplete. Do not call harness_todo just to track the current run. If you call harness_task with action:\"upsert\", provide task_name, status, and objective. If you call harness_todo with action:\"upsert\", provide category, task_name, status, and objective."
+    const workspace_state_note = if (execution_context.workspace_state_enabled)
+        "Workspace-state tools are enabled because this request is explicitly .var-state-related. Use init_workspace only when the canonical structure is missing or incomplete. Do not call todo_slice just to track the current run. If you call session_record with action:\"upsert\", provide session_name, status, and objective. If you call todo_slice with action:\"upsert\", provide category, todo_name, status, and objective."
     else
-        "Harness tools are not in the current catalog because this task is not explicitly harness-related. For normal coding work, use file tools and agent tools only, and do not invent extra harness bookkeeping.";
+        "Workspace-state tools are not in the current catalog because this request is not explicitly .var-state-related. For normal coding work, use file tools and agent tools only, and do not invent extra workspace-state bookkeeping.";
 
     return std.fmt.allocPrint(
         allocator,
-        \\You are VAR1, a coding harness agent operating inside the workspace root `{s}`.
+        \\You are VAR1, a coding kernel agent operating inside the workspace root `{s}`.
         \\Use the built-in tools whenever they help you inspect, search, create, or edit files.
         \\Tool arguments must be valid JSON objects that match the declared schema exactly and use only the documented keys.
         \\If a tool returns ok:false or includes a tool error hint, repair the call instead of repeating the same failing arguments.
         \\Use list_files to discover paths, search_files to search contents, read_file to inspect a known file, write_file to replace a file, append_file to add text, and replace_in_file for exact string swaps.
-        \\If the task explicitly touches harness process state, use the canonical .var tools instead of inventing a second ledger or runtime surface.
+        \\If the request explicitly touches workspace process state, use the canonical .var tools instead of inventing a second ledger or runtime surface.
         \\{s}
         \\If agent tools are available, you may launch a bounded child VAR1 agent instead of doing all work yourself.
         \\Use agent_status for non-blocking child supervision. Use wait_agent only when you are ready to spend bounded time collecting a child result or current snapshot.
@@ -436,7 +430,7 @@ pub fn buildAgentSystemPrompt(allocator: std.mem.Allocator, execution_context: E
         \\
         \\{s}
     ,
-        .{ execution_context.workspace_root, harness_note, catalog },
+        .{ execution_context.workspace_root, workspace_state_note, catalog },
     );
 }
 
@@ -446,12 +440,12 @@ pub fn toolErrorHint(tool_name: []const u8, error_name: []const u8) ?[]const u8 
         std.mem.eql(u8, error_name, "UnexpectedToken");
 
     if (is_schema_error) {
-        if (std.mem.eql(u8, tool_name, "harness_todo")) {
-            return "Use valid JSON. harness_todo upsert requires category, task_name, status, and objective. The current run already has a runtime-managed todo slice, so skip harness_todo unless you need a separate repo-level execution slice.";
+        if (std.mem.eql(u8, tool_name, "todo_slice")) {
+            return "Use valid JSON. todo_slice upsert requires category, todo_name, status, and objective. The current run already has a runtime-managed todo slice, so skip todo_slice unless you need a separate repo-level execution slice.";
         }
 
-        if (std.mem.eql(u8, tool_name, "harness_task")) {
-            return "Use valid JSON. harness_task upsert requires task_name, status, and objective.";
+        if (std.mem.eql(u8, tool_name, "session_record")) {
+            return "Use valid JSON. session_record upsert requires session_name, status, and objective.";
         }
 
         return "Arguments did not match the tool schema. Repair the JSON object and retry with only the declared fields.";
@@ -462,7 +456,7 @@ pub fn toolErrorHint(tool_name: []const u8, error_name: []const u8) ?[]const u8 
     }
 
     if (std.mem.eql(u8, error_name, "FileNotFound")) {
-        if (std.mem.eql(u8, canonicalToolName(tool_name), "search_files")) {
+        if (std.mem.eql(u8, tool_name, "search_files")) {
             return "The search path or the iex executable was not found. Re-check the workspace-relative path with list_files, or switch to read_file if you already know the target file.";
         }
         if (std.mem.eql(u8, tool_name, "list_files")) {
@@ -478,7 +472,7 @@ pub fn toolErrorHint(tool_name: []const u8, error_name: []const u8) ?[]const u8 
         return "The requested workspace path or file was not found. Re-check the workspace-relative path before retrying.";
     }
 
-    if (std.mem.eql(u8, error_name, "CommandFailed") and std.mem.eql(u8, canonicalToolName(tool_name), "search_files")) {
+    if (std.mem.eql(u8, error_name, "CommandFailed") and std.mem.eql(u8, tool_name, "search_files")) {
         return "search_files failed. Confirm the search path with list_files and retry with a smaller, valid workspace-relative target, or switch to read_file if you already know the file.";
     }
 
@@ -498,7 +492,6 @@ pub fn renderToolCallSummary(allocator: std.mem.Allocator, tool_calls: []const t
 }
 
 pub fn toolCallLogLabel(tool_name: []const u8) []const u8 {
-    if (std.mem.eql(u8, tool_name, "rg_search")) return "search_files";
     if (std.mem.eql(u8, tool_name, "launch_agent")) return "child_run_dispatch";
     if (std.mem.eql(u8, tool_name, "agent_status")) return "child_run_status_check";
     if (std.mem.eql(u8, tool_name, "wait_agent")) return "child_run_wait";
@@ -566,7 +559,7 @@ pub fn executeWithRunner(
     if (std.mem.eql(u8, tool_call.name, "list_files")) {
         return executeListFiles(allocator, execution_context.workspace_root, tool_call.arguments_json, runner);
     }
-    if (std.mem.eql(u8, tool_call.name, "search_files") or std.mem.eql(u8, tool_call.name, "rg_search")) {
+    if (std.mem.eql(u8, tool_call.name, "search_files")) {
         return executeSearchFiles(allocator, execution_context.workspace_root, tool_call.arguments_json, runner);
     }
     if (std.mem.eql(u8, tool_call.name, "read_file")) {
@@ -581,8 +574,8 @@ pub fn executeWithRunner(
     if (std.mem.eql(u8, tool_call.name, "replace_in_file")) {
         return executeReplaceInFile(allocator, execution_context.workspace_root, tool_call.arguments_json);
     }
-    if (harness_tools.handles(tool_call.name)) {
-        return harness_tools.execute(allocator, execution_context.workspace_root, tool_call.name, tool_call.arguments_json, runner);
+    if (workspace_state_tools.handles(tool_call.name)) {
+        return workspace_state_tools.execute(allocator, execution_context.workspace_root, tool_call.name, tool_call.arguments_json, runner);
     }
     if (std.mem.eql(u8, tool_call.name, "launch_agent")) {
         return executeLaunchAgent(allocator, execution_context, tool_call.arguments_json);
@@ -1217,5 +1210,5 @@ test "tool catalog includes the built-in coding tools" {
     try std.testing.expect(std.mem.indexOf(u8, catalog, "search_files") != null);
     try std.testing.expect(std.mem.indexOf(u8, catalog, "replace_in_file") != null);
     try std.testing.expect(std.mem.indexOf(u8, catalog, "Example JSON: {\"pattern\":\"read_file\",\"path\":\"src\",\"glob\":\"*.zig\",\"max_results\":20}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, catalog, "harness_todo") == null);
+    try std.testing.expect(std.mem.indexOf(u8, catalog, "todo_slice") == null);
 }

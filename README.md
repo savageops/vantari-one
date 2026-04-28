@@ -2,14 +2,14 @@
 
 <div align="center">
 
-Ventari 1 provides a project-local agent harness that executes model sessions through the `VAR1` Zig kernel, persists replayable `.var/sessions` ledgers, and exposes CLI/browser ingress through JSON-RPC and HTTP bridge contracts.
+Ventari 1 provides a project-local agent runtime that executes model sessions through the `VAR1` Zig kernel, persists replayable `.var/sessions` ledgers, and exposes CLI/browser ingress through JSON-RPC and HTTP bridge contracts.
 
 [![Release](https://img.shields.io/github/v/release/savageops/VANTARI-ONE?display_name=tag&sort=semver&label=Release)](https://github.com/savageops/VANTARI-ONE/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/savageops/VANTARI-ONE/total?label=Downloads)](https://github.com/savageops/VANTARI-ONE/releases)
 [![Stars](https://img.shields.io/github/stars/savageops/VANTARI-ONE?label=Stars)](https://github.com/savageops/VANTARI-ONE/stargazers)
 [![Issues](https://img.shields.io/github/issues/savageops/VANTARI-ONE?label=Issues)](https://github.com/savageops/VANTARI-ONE/issues)
 [![Last Commit](https://img.shields.io/github/last-commit/savageops/VANTARI-ONE?label=Last%20commit)](https://github.com/savageops/VANTARI-ONE/commits/main)
-[![Docs](https://img.shields.io/badge/Docs-architecture-111111)](./.docs/research/agent-harness-architecture-blueprint.md)
+[![Docs](https://img.shields.io/badge/Docs-architecture-111111)](#architectural-overview)
 [![Built with Zig](https://img.shields.io/badge/Built%20with-Zig-f7a41d?logo=zig)](https://ziglang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-0f766e)](./LICENSE)
 
@@ -45,7 +45,7 @@ flowchart TB
   subgraph core["kernel-owned runtime"]
     kernel --> sessions["session lifecycle"]
     kernel --> context["context compiler"]
-    kernel --> tools["tool socket registry"]
+    kernel --> tools["tool runtime registry"]
     kernel --> plugins["plugin manifest contracts"]
     kernel --> provider["provider transport"]
     kernel --> events["event emission"]
@@ -64,16 +64,25 @@ flowchart TB
 
 | Capability | Contract |
 |---|---|
-| Session-native execution | Creates, resumes, sends, cancels, reads, and lists sessions through the protocol surface. |
+| Session-native execution | Creates, resumes, sends, compacts, cancels, reads, and lists sessions through the protocol surface. |
 | Durable transcript ledger | Persists user/assistant messages in `messages.jsonl` with stable message identifiers and monotonic sequence numbers. |
 | Context compilation | Builds provider-ready message windows from `session.json`, `messages.jsonl`, and the latest `context.jsonl` checkpoint. |
-| Checkpointed compaction path | Stores compacted/model-ready continuity in `context.jsonl` without replacing the complete transcript. |
+| Checkpointed compaction path | Generates deterministic Zig-native summary checkpoints in `context.jsonl` without replacing the complete transcript. |
 | Event persistence | Records runtime progress, tool lifecycle entries, bridge notifications, and terminal state in `events.jsonl`. |
-| Tool integration | Publishes built-in tool contracts and schema-shaped sockets through the kernel namespace. |
-| Plugin boundary | Validates plugin manifests and socket declarations without granting direct store/provider access. |
+| Tool integration | Publishes built-in tool contracts from the kernel registry as JSON schemas for provider calls and `tools/list`. |
+| Command-backed search | Exposes `search_files` as the content-search tool over the external `iex` executable; `list_files` remains native Zig workspace discovery. |
+| Plugin boundary | Validates plugin manifests and socket declarations without runtime loading or direct store/provider access. |
 | Provider isolation | Resolves OpenAI-compatible provider configuration behind the runtime boundary. |
 | Browser ingress | Exposes `/rpc`, `/events`, and `/api/health` as bridge surfaces over the kernel protocol. |
 | CLI ingress | Uses the same session/protocol vocabulary rather than maintaining a separate execution path. |
+
+## Tool Runtime
+
+Tool contracts are kernel-owned. The live registry starts in `src/core/tools/runtime.zig`, flows through `builtinDefinitionsForContext(...)`, and is serialized into provider-compatible function schemas by `src/core/providers/openai_compatible.zig`. The same definitions are exposed over `tools/list` and `VAR1 tools --json`.
+
+`search_files` is the only content-search tool. It shells to `iex search --json` through the command-runner boundary. A checkout or packaged install must provide a real `iex` executable on `PATH` or beside the process before that tool is operational. `list_files` is a native Zig directory/file discovery primitive and does not depend on `iex`.
+
+Plugin support is currently contract-level: `src/core/tools/sockets.zig` validates typed tool sockets and `src/core/plugins/manifest.zig` validates plugin socket declarations. There is no automatic plugin discovery or dynamic plugin execution in the shipped runtime.
 
 ## Session Ledger
 
@@ -120,6 +129,7 @@ The kernel exposes JSON-RPC 2.0 methods over stdio. Frames use `Content-Length` 
 | `session/create` | initializes a session record |
 | `session/resume` | loads an existing session into runtime state |
 | `session/send` | appends optional user input and advances execution |
+| `session/compact` | writes an entry-aware context checkpoint from stable message sequence ranges |
 | `session/cancel` | marks cancellation intent for a running session |
 | `session/get` | returns session summary, messages, and events |
 | `session/list` | returns known session summaries |
@@ -146,6 +156,8 @@ sequenceDiagram
   Kernel-->>Host: session result + notifications
   Host-->>Client: JSON-RPC response / SSE event
 ```
+
+`session/compact` accepts optional `keep_recent_messages`, `max_entries_per_checkpoint`, `aggressiveness`, and `trigger` fields. `max_entries_per_checkpoint` lets the same primitive compact one JSONL row or a bounded segment at a time. `aggressiveness` is a `0..1` slider projected into the checkpoint as `aggressiveness_milli`; a stronger later value can recompact the previously covered range from the immutable transcript instead of stacking duplicate work.
 
 ## Configuration
 
@@ -185,8 +197,6 @@ Provider-backed smoke validation depends on the configured provider exposing `MO
 
 - [`apps/backend/variant-1/README.md`](./apps/backend/variant-1/README.md)
 - [`apps/backend/variant-1/architecture.md`](./apps/backend/variant-1/architecture.md)
-- [`.docs/research/agent-harness-architecture-blueprint.md`](./.docs/research/agent-harness-architecture-blueprint.md)
-- [`.docs/research/agent-harness-architecture-mermaid.md`](./.docs/research/agent-harness-architecture-mermaid.md)
 - [`.docs/research/2026-04-24-context-builder-baseline.md`](./.docs/research/2026-04-24-context-builder-baseline.md)
 - [`.docs/research/2026-04-24-pluggable-backend-hierarchy-baseline.md`](./.docs/research/2026-04-24-pluggable-backend-hierarchy-baseline.md)
 

@@ -1,5 +1,5 @@
 const std = @import("std");
-const fsutil = @import("fsutil.zig");
+const fsutil = @import("../../shared/fsutil.zig");
 
 pub const Error = error{
     InvalidAuthState,

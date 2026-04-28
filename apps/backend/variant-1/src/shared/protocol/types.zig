@@ -1,5 +1,5 @@
 const std = @import("std");
-const types = @import("types.zig");
+const types = @import("../types.zig");
 
 pub const notification_methods = struct {
     pub const session_event = "session/event";
@@ -10,6 +10,7 @@ pub const methods = struct {
     pub const session_create = "session/create";
     pub const session_resume = "session/resume";
     pub const session_send = "session/send";
+    pub const session_compact = "session/compact";
     pub const session_cancel = "session/cancel";
     pub const session_get = "session/get";
     pub const session_list = "session/list";
@@ -22,6 +23,7 @@ pub const Capabilities = struct {
     session_create: bool = true,
     session_resume: bool = true,
     session_send: bool = true,
+    session_compact: bool = true,
     session_cancel: bool = true,
     session_get: bool = true,
     session_list: bool = true,
@@ -67,6 +69,13 @@ pub const SessionResumeResult = struct {
 
 pub const SessionSendResult = struct {
     session: SessionSummary,
+};
+
+pub const SessionCompactResult = struct {
+    session_id: []const u8,
+    compacted: bool,
+    checkpoint: ?types.ContextCheckpoint = null,
+    reason: ?[]const u8 = null,
 };
 
 pub const SessionGetResult = struct {
@@ -116,6 +125,7 @@ test "protocol capabilities advertise the full session surface" {
     try std.testing.expect(capabilities.session_create);
     try std.testing.expect(capabilities.session_resume);
     try std.testing.expect(capabilities.session_send);
+    try std.testing.expect(capabilities.session_compact);
     try std.testing.expect(capabilities.session_cancel);
     try std.testing.expect(capabilities.session_get);
     try std.testing.expect(capabilities.session_list);

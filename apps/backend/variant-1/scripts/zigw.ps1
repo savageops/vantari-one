@@ -11,13 +11,9 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $zigVersion = "0.15.1"
 $toolchainRoot = Join-Path $env:LOCALAPPDATA "VANTARI-ONE\toolchains"
-$legacyToolchainRoot = Join-Path $env:LOCALAPPDATA "agent-harness-experimental\toolchains"
 $installDir = Join-Path $toolchainRoot "zig-x86_64-windows-$zigVersion"
-$legacyInstallDir = Join-Path $legacyToolchainRoot "zig-x86_64-windows-$zigVersion"
 $zigExe = Join-Path $installDir "zig.exe"
-$legacyZigExe = Join-Path $legacyInstallDir "zig.exe"
 $bundledArchive = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "..\.toolchain\zig-x86_64-windows-$zigVersion.zip"
-$legacyArchive = Join-Path $legacyToolchainRoot "zig-x86_64-windows-$zigVersion.zip"
 $downloadUrl = "https://ziglang.org/download/$zigVersion/zig-x86_64-windows-$zigVersion.zip"
 
 function Test-ZigArchive {
@@ -52,15 +48,6 @@ function Test-ZigArchive {
 function Install-ZigToolchain {
   New-Item -ItemType Directory -Force -Path $toolchainRoot | Out-Null
 
-  if (Test-Path -LiteralPath $legacyZigExe) {
-    if (Test-Path -LiteralPath $installDir) {
-      Remove-Item -LiteralPath $installDir -Recurse -Force
-    }
-    # Prefer the last known-good installed toolchain during the repo-root rename.
-    Copy-Item -LiteralPath $legacyInstallDir -Destination $installDir -Recurse -Force
-    return
-  }
-
   $archivePath = Join-Path $toolchainRoot "zig-x86_64-windows-$zigVersion.zip"
   $extractDir = Join-Path $toolchainRoot "_extract-zig-$zigVersion"
   $expandedDir = Join-Path $extractDir "zig-x86_64-windows-$zigVersion"
@@ -76,9 +63,6 @@ function Install-ZigToolchain {
 
   if (Test-Path -LiteralPath $bundledArchive) {
     Copy-Item -LiteralPath $bundledArchive -Destination $archivePath -Force
-  } elseif (-not (Test-Path -LiteralPath $archivePath) -and (Test-ZigArchive -Path $legacyArchive)) {
-    # One-time cache migration so the renamed repo root can reuse the last known-good wrapper payload.
-    Copy-Item -LiteralPath $legacyArchive -Destination $archivePath -Force
   } elseif (-not (Test-Path -LiteralPath $archivePath)) {
     Invoke-WebRequest -Uri $downloadUrl -OutFile $archivePath
   }

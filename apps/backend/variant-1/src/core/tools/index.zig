@@ -1,6 +1,7 @@
 const std = @import("std");
 
-pub const runtime = @import("../../tools.zig");
+pub const runtime = @import("runtime.zig");
+pub const workspace_runtime = @import("workspace_runtime.zig");
 pub const sockets = @import("sockets.zig");
 
 pub const ExecutionContext = runtime.ExecutionContext;
@@ -16,6 +17,7 @@ pub const validateDefinition = sockets.validateDefinition;
 
 test "tools namespace exposes runtime and socket contracts" {
     try std.testing.expect(@hasDecl(@This(), "runtime"));
+    try std.testing.expect(@hasDecl(@This(), "workspace_runtime"));
     try std.testing.expect(@hasDecl(@This(), "sockets"));
     try std.testing.expect(@hasDecl(@This(), "validateDefinition"));
 }

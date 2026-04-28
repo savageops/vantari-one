@@ -1,10 +1,11 @@
 const std = @import("std");
-const loop = @import("loop.zig");
-const protocol_types = @import("protocol_types.zig");
-const provider = @import("provider.zig");
-const store = @import("store.zig");
-const tools = @import("tools.zig");
-const types = @import("types.zig");
+const context_compactor = @import("../core/context/compactor.zig");
+const loop = @import("../core/executor/loop.zig");
+const protocol_types = @import("../shared/protocol/types.zig");
+const provider = @import("../core/providers/openai_compatible.zig");
+const store = @import("../core/sessions/store.zig");
+const tools = @import("../core/tools/runtime.zig");
+const types = @import("../shared/types.zig");
 
 pub const Error = error{
     InvalidRequest,
@@ -507,6 +508,9 @@ fn dispatch(
     if (std.mem.eql(u8, method_name, protocol_types.methods.session_send)) {
         return handleSessionSend(server, params);
     }
+    if (std.mem.eql(u8, method_name, protocol_types.methods.session_compact)) {
+        return handleSessionCompact(server, params);
+    }
     if (std.mem.eql(u8, method_name, protocol_types.methods.session_cancel)) {
         return handleSessionCancel(server, params);
     }
@@ -672,6 +676,55 @@ fn handleSessionSend(server: *Server, params: ?std.json.Value) ![]u8 {
     return renderJsonAlloc(server.allocator, protocol_types.SessionSendResult{
         .session = makeSessionSummary(completed, output),
     });
+}
+
+fn handleSessionCompact(server: *Server, params: ?std.json.Value) ![]u8 {
+    const Args = struct {
+        session_id: []const u8,
+        keep_recent_messages: ?u32 = null,
+        max_entries_per_checkpoint: ?u32 = null,
+        aggressiveness: ?f64 = null,
+        trigger: ?[]const u8 = null,
+    };
+
+    var parsed = try parseParams(Args, server.allocator, params);
+    defer parsed.deinit();
+
+    var session = store.readSessionRecord(server.allocator, server.config.workspace_root, parsed.value.session_id) catch {
+        return Error.SessionNotFound;
+    };
+    defer session.deinit(server.allocator);
+
+    try server.runtime.ensureSession(server.allocator, session.id, null);
+    if (server.runtime.isRunning(session.id)) return Error.SessionRunning;
+
+    const trigger = parsed.value.trigger orelse "manual";
+    const keep_recent_messages = @as(usize, parsed.value.keep_recent_messages orelse 4);
+    const max_entries_per_checkpoint = @as(usize, parsed.value.max_entries_per_checkpoint orelse 0);
+    const aggressiveness_milli = try compactAggressivenessMilli(parsed.value.aggressiveness);
+    const compact_result = context_compactor.compactSession(server.allocator, server.config.workspace_root, session.id, .{
+        .keep_recent_messages = keep_recent_messages,
+        .max_entries_per_checkpoint = max_entries_per_checkpoint,
+        .aggressiveness_milli = aggressiveness_milli,
+        .trigger = trigger,
+    }) catch |err| switch (err) {
+        context_compactor.Error.InvalidCompactionOptions => return Error.InvalidParams,
+        else => return err,
+    };
+    defer compact_result.deinit(server.allocator);
+
+    return renderJsonAlloc(server.allocator, protocol_types.SessionCompactResult{
+        .session_id = session.id,
+        .compacted = compact_result.checkpoint != null,
+        .checkpoint = compact_result.checkpoint,
+        .reason = if (compact_result.checkpoint == null) compact_result.reason else null,
+    });
+}
+
+fn compactAggressivenessMilli(value: ?f64) !u16 {
+    const provided = value orelse return 350;
+    if (!std.math.isFinite(provided) or provided < 0.0 or provided > 1.0) return Error.InvalidParams;
+    return @intFromFloat(provided * 1000.0 + 0.5);
 }
 
 fn handleSessionCancel(server: *Server, params: ?std.json.Value) ![]u8 {
@@ -1142,7 +1195,7 @@ const test_config = types.Config{
     .openai_base_url = @constCast("http://127.0.0.1:1234"),
     .openai_api_key = @constCast("test-key"),
     .openai_model = @constCast("test-model"),
-    .harness_max_steps = 2,
+    .max_steps = 2,
     .workspace_root = @constCast("."),
 };
 

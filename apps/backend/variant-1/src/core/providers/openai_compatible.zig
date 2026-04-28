@@ -1,5 +1,5 @@
 const std = @import("std");
-const types = @import("types.zig");
+const types = @import("../../shared/types.zig");
 
 // TODO: Keep transport details isolated here so the loop stays provider-agnostic.
 

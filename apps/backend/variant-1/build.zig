@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    // TODO: Keep the build graph small and explicit so the harness remains easy to audit.
+    // TODO: Keep the build graph small and explicit so the kernel remains easy to audit.
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 

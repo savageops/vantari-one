@@ -10,7 +10,7 @@ fn makeToolCall(
     allocator: std.mem.Allocator,
     name: []const u8,
     arguments_json: []const u8,
-) !VAR1.types.ToolCall {
+) !VAR1.shared.types.ToolCall {
     return .{
         .id = try allocator.dupe(u8, "call-1"),
         .name = try allocator.dupe(u8, name),
@@ -18,7 +18,7 @@ fn makeToolCall(
     };
 }
 
-fn execCtx(workspace_root: []const u8) VAR1.tools.ExecutionContext {
+fn execCtx(workspace_root: []const u8) VAR1.core.tool_runtime.ExecutionContext {
     return .{
         .workspace_root = workspace_root,
     };
@@ -38,7 +38,7 @@ fn mockCommandRunner(
     allocator: std.mem.Allocator,
     cwd: []const u8,
     argv: []const []const u8,
-) anyerror!VAR1.tools.CommandOutput {
+) anyerror!VAR1.core.tool_runtime.CommandOutput {
     var ctx: *MockCommandContext = @ptrCast(@alignCast(ctx_ptr.?));
 
     var joined = std.array_list.Managed(u8).init(ctx.allocator);
@@ -52,11 +52,11 @@ fn mockCommandRunner(
     ctx.last_command = try joined.toOwnedSlice();
 
     const stdout = if (std.mem.eql(u8, argv[1], "--files"))
-        try allocator.dupe(u8, "src/main.zig\nsrc/tools.zig\n")
+        try allocator.dupe(u8, "src/main.zig\nsrc/core/tools/runtime.zig\n")
     else if (std.mem.eql(u8, argv[1], "search")) blk: {
         const main_path = try std.fmt.allocPrint(allocator, "{s}{c}src{c}main.zig", .{ cwd, std.fs.path.sep, std.fs.path.sep });
         defer allocator.free(main_path);
-        const tools_path = try std.fmt.allocPrint(allocator, "{s}{c}src{c}tools.zig", .{ cwd, std.fs.path.sep, std.fs.path.sep });
+        const tools_path = try std.fmt.allocPrint(allocator, "{s}{c}src{c}core{c}tools{c}runtime.zig", .{ cwd, std.fs.path.sep, std.fs.path.sep, std.fs.path.sep, std.fs.path.sep });
         defer allocator.free(tools_path);
         break :blk try std.fmt.allocPrint(
             allocator,
@@ -98,7 +98,7 @@ fn mockBackupRunner(
     allocator: std.mem.Allocator,
     _: []const u8,
     argv: []const []const u8,
-) anyerror!VAR1.tools.CommandOutput {
+) anyerror!VAR1.core.tool_runtime.CommandOutput {
     const ctx: *RecorderCommandContext = @ptrCast(@alignCast(ctx_ptr.?));
     try recordCommand(ctx, argv);
 
@@ -114,7 +114,7 @@ fn mockNonGitRunner(
     allocator: std.mem.Allocator,
     _: []const u8,
     argv: []const []const u8,
-) anyerror!VAR1.tools.CommandOutput {
+) anyerror!VAR1.core.tool_runtime.CommandOutput {
     const ctx: *RecorderCommandContext = @ptrCast(@alignCast(ctx_ptr.?));
     try recordCommand(ctx, argv);
 
@@ -153,7 +153,7 @@ fn mockAgentStatus(
     _: []const u8,
     _: []const u8,
 ) anyerror![]u8 {
-    return allocator.dupe(u8, "AGENT_NAME berry-child\nSTATUS running\nSESSION_ID task-child\nPARENT_SESSION_ID task-parent\nTERMINAL false\nLATEST_EVENT_TYPE tool_completed\nLATEST_EVENT_MESSAGE tool completed: write_file");
+    return allocator.dupe(u8, "AGENT_NAME berry-child\nSTATUS running\nSESSION_ID session-child\nPARENT_SESSION_ID session-parent\nTERMINAL false\nLATEST_EVENT_TYPE tool_completed\nLATEST_EVENT_MESSAGE tool completed: write_file");
 }
 
 fn mockWaitAgent(
@@ -163,7 +163,7 @@ fn mockWaitAgent(
     _: []const u8,
     _: usize,
 ) anyerror![]u8 {
-    return allocator.dupe(u8, "AGENT_NAME berry-child\nSTATUS completed\nSESSION_ID task-child\nPARENT_SESSION_ID task-parent\nWAIT_STATE terminal\nOUTPUT There are 3 r's in strawberry.");
+    return allocator.dupe(u8, "AGENT_NAME berry-child\nSTATUS completed\nSESSION_ID session-child\nPARENT_SESSION_ID session-parent\nWAIT_STATE terminal\nOUTPUT There are 3 r's in strawberry.");
 }
 
 fn mockListAgents(
@@ -171,7 +171,7 @@ fn mockListAgents(
     allocator: std.mem.Allocator,
     _: []const u8,
 ) anyerror![]u8 {
-    return allocator.dupe(u8, "AGENT_NAME berry-child STATUS completed SESSION_ID task-child\n");
+    return allocator.dupe(u8, "AGENT_NAME berry-child STATUS completed SESSION_ID session-child\n");
 }
 
 test "tool socket validates tool definitions through core namespace" {
@@ -227,22 +227,22 @@ test "file tools can create append replace and read within the workspace" {
 
     var write_call = try makeToolCall(std.testing.allocator, "write_file", "{\"path\":\"notes/example.txt\",\"content\":\"alpha\\n\"}");
     defer write_call.deinit(std.testing.allocator);
-    const write_output = try VAR1.tools.execute(std.testing.allocator, execCtx(workspace_root), write_call);
+    const write_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execCtx(workspace_root), write_call);
     defer std.testing.allocator.free(write_output);
 
     var append_call = try makeToolCall(std.testing.allocator, "append_file", "{\"path\":\"notes/example.txt\",\"content\":\"beta\\n\"}");
     defer append_call.deinit(std.testing.allocator);
-    const append_output = try VAR1.tools.execute(std.testing.allocator, execCtx(workspace_root), append_call);
+    const append_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execCtx(workspace_root), append_call);
     defer std.testing.allocator.free(append_output);
 
     var replace_call = try makeToolCall(std.testing.allocator, "replace_in_file", "{\"path\":\"notes/example.txt\",\"old_text\":\"beta\",\"new_text\":\"gamma\"}");
     defer replace_call.deinit(std.testing.allocator);
-    const replace_output = try VAR1.tools.execute(std.testing.allocator, execCtx(workspace_root), replace_call);
+    const replace_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execCtx(workspace_root), replace_call);
     defer std.testing.allocator.free(replace_output);
 
     var read_call = try makeToolCall(std.testing.allocator, "read_file", "{\"path\":\"notes/example.txt\",\"start_line\":1,\"end_line\":2}");
     defer read_call.deinit(std.testing.allocator);
-    const read_output = try VAR1.tools.execute(std.testing.allocator, execCtx(workspace_root), read_call);
+    const read_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execCtx(workspace_root), read_call);
     defer std.testing.allocator.free(read_output);
 
     try std.testing.expect(std.mem.indexOf(u8, write_output, "\"ok\":true") != null);
@@ -259,13 +259,13 @@ test "append primitive preserves existing file content" {
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    const file_path = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, "journal.txt" });
+    const file_path = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ workspace_root, "journal.txt" });
     defer std.testing.allocator.free(file_path);
 
-    try VAR1.fsutil.writeText(file_path, "alpha\n");
-    try VAR1.fsutil.appendText(file_path, "beta\n");
+    try VAR1.shared.fsutil.writeText(file_path, "alpha\n");
+    try VAR1.shared.fsutil.appendText(file_path, "beta\n");
 
-    const contents = try VAR1.fsutil.readTextAlloc(std.testing.allocator, file_path);
+    const contents = try VAR1.shared.fsutil.readTextAlloc(std.testing.allocator, file_path);
     defer std.testing.allocator.free(contents);
 
     try std.testing.expectEqualStrings("alpha\nbeta\n", contents);
@@ -281,7 +281,7 @@ test "file tools reject paths outside the workspace" {
     var write_call = try makeToolCall(std.testing.allocator, "write_file", "{\"path\":\"../escape.txt\",\"content\":\"blocked\"}");
     defer write_call.deinit(std.testing.allocator);
 
-    try std.testing.expectError(VAR1.fsutil.PathError.PathOutsideWorkspace, VAR1.tools.execute(std.testing.allocator, execCtx(workspace_root), write_call));
+    try std.testing.expectError(VAR1.shared.fsutil.PathError.PathOutsideWorkspace, VAR1.core.tool_runtime.execute(std.testing.allocator, execCtx(workspace_root), write_call));
 }
 
 test "list_files defaults to the workspace root and returns relative paths" {
@@ -297,7 +297,7 @@ test "list_files defaults to the workspace root and returns relative paths" {
 
     var list_call = try makeToolCall(std.testing.allocator, "list_files", "{\"max_results\":10}");
     defer list_call.deinit(std.testing.allocator);
-    const list_output = try VAR1.tools.execute(std.testing.allocator, execCtx(workspace_root), list_call);
+    const list_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execCtx(workspace_root), list_call);
     defer std.testing.allocator.free(list_output);
 
     try std.testing.expect(std.mem.indexOf(u8, list_output, "\"ok\":true") != null);
@@ -317,7 +317,7 @@ test "search_files uses the command runner contract" {
 
     var search_call = try makeToolCall(std.testing.allocator, "search_files", "{\"pattern\":\"read_file\",\"path\":\"src\",\"max_results\":5}");
     defer search_call.deinit(std.testing.allocator);
-    const search_output = try VAR1.tools.executeWithRunner(std.testing.allocator, execCtx(workspace_root), search_call, .{
+    const search_output = try VAR1.core.tool_runtime.executeWithRunner(std.testing.allocator, execCtx(workspace_root), search_call, .{
         .context = &context,
         .runFn = mockCommandRunner,
     });
@@ -327,35 +327,13 @@ test "search_files uses the command runner contract" {
     try std.testing.expect(std.mem.indexOf(u8, search_output, "src/main.zig:12:read_file") != null);
 }
 
-test "legacy rg_search remains a compatibility alias for search_files execution" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
-    defer std.testing.allocator.free(workspace_root);
-
-    var context = MockCommandContext{ .allocator = std.testing.allocator };
-    defer context.deinit();
-
-    var search_call = try makeToolCall(std.testing.allocator, "rg_search", "{\"pattern\":\"read_file\",\"path\":\"src\",\"max_results\":5}");
-    defer search_call.deinit(std.testing.allocator);
-    const search_output = try VAR1.tools.executeWithRunner(std.testing.allocator, execCtx(workspace_root), search_call, .{
-        .context = &context,
-        .runFn = mockCommandRunner,
-    });
-    defer std.testing.allocator.free(search_output);
-
-    try std.testing.expect(std.mem.indexOf(u8, search_output, "\"tool\":\"search_files\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, search_output, "src/tools.zig:9:search_files") != null);
-}
-
 test "agent tools use the agent service contract and surface agent tool catalog" {
     var context = MockAgentContext{ .allocator = std.testing.allocator };
     defer context.deinit();
 
-    const execution_context = VAR1.tools.ExecutionContext{
+    const execution_context = VAR1.core.tool_runtime.ExecutionContext{
         .workspace_root = ".",
-        .parent_session_id = "task-parent",
+        .parent_session_id = "session-parent",
         .agent_service = .{
             .context = &context,
             .launchFn = mockLaunchAgent,
@@ -365,123 +343,123 @@ test "agent tools use the agent service contract and surface agent tool catalog"
         },
     };
 
-    const catalog = try VAR1.tools.renderCatalog(std.testing.allocator, execution_context);
+    const catalog = try VAR1.core.tool_runtime.renderCatalog(std.testing.allocator, execution_context);
     defer std.testing.allocator.free(catalog);
     try std.testing.expect(std.mem.indexOf(u8, catalog, "launch_agent") != null);
     try std.testing.expect(std.mem.indexOf(u8, catalog, "wait_agent") != null);
 
     var launch_call = try makeToolCall(std.testing.allocator, "launch_agent", "{\"prompt\":\"how many r in strawberry\",\"name\":\"berry-child\"}");
     defer launch_call.deinit(std.testing.allocator);
-    const launch_output = try VAR1.tools.execute(std.testing.allocator, execution_context, launch_call);
+    const launch_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execution_context, launch_call);
     defer std.testing.allocator.free(launch_output);
     try std.testing.expect(std.mem.indexOf(u8, launch_output, "berry-child") != null);
     try std.testing.expect(std.mem.indexOf(u8, context.last_prompt.?, "strawberry") != null);
 
     var status_call = try makeToolCall(std.testing.allocator, "agent_status", "{\"name\":\"berry-child\"}");
     defer status_call.deinit(std.testing.allocator);
-    const status_output = try VAR1.tools.execute(std.testing.allocator, execution_context, status_call);
+    const status_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execution_context, status_call);
     defer std.testing.allocator.free(status_output);
     try std.testing.expect(std.mem.indexOf(u8, status_output, "LATEST_EVENT_TYPE tool_completed") != null);
 
     var wait_call = try makeToolCall(std.testing.allocator, "wait_agent", "{\"name\":\"berry-child\",\"timeout_ms\":500}");
     defer wait_call.deinit(std.testing.allocator);
-    const wait_output = try VAR1.tools.execute(std.testing.allocator, execution_context, wait_call);
+    const wait_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execution_context, wait_call);
     defer std.testing.allocator.free(wait_output);
     try std.testing.expect(std.mem.indexOf(u8, wait_output, "There are 3 r's") != null);
     try std.testing.expect(std.mem.indexOf(u8, wait_output, "WAIT_STATE terminal") != null);
 
     var list_call = try makeToolCall(std.testing.allocator, "list_agents", "{}");
     defer list_call.deinit(std.testing.allocator);
-    const list_output = try VAR1.tools.execute(std.testing.allocator, execution_context, list_call);
+    const list_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execution_context, list_call);
     defer std.testing.allocator.free(list_output);
     try std.testing.expect(std.mem.indexOf(u8, list_output, "AGENT_NAME berry-child") != null);
 }
 
-test "harness tools scaffold and manage canonical root artifacts" {
+test "workspace-state tools scaffold and manage canonical root artifacts" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    var init_call = try makeToolCall(std.testing.allocator, "init_harness", "{}");
+    var init_call = try makeToolCall(std.testing.allocator, "init_workspace", "{}");
     defer init_call.deinit(std.testing.allocator);
-    const init_output = try VAR1.tools.execute(std.testing.allocator, execCtx(workspace_root), init_call);
+    const init_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execCtx(workspace_root), init_call);
     defer std.testing.allocator.free(init_output);
     try std.testing.expect(std.mem.indexOf(u8, init_output, "FILES_WRITTEN") != null);
 
-    const harness_readme = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, ".var", "README.md" });
-    defer std.testing.allocator.free(harness_readme);
-    try std.testing.expect(VAR1.fsutil.fileExists(harness_readme));
+    const workspace_state_readme = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ workspace_root, ".var", "README.md" });
+    defer std.testing.allocator.free(workspace_state_readme);
+    try std.testing.expect(VAR1.shared.fsutil.fileExists(workspace_state_readme));
 
-    var task_call = try makeToolCall(
+    var session_call = try makeToolCall(
         std.testing.allocator,
-        "harness_task",
-        "{\"action\":\"upsert\",\"task_name\":\"demo-task\",\"status\":\"in_progress\",\"objective\":\"Finalize the root tool runtime.\",\"scope\":[\"add missing tools\"],\"evidence_roots\":[\"variant-1/src\",\"variant-1/tests\"]}",
+        "session_record",
+        "{\"action\":\"upsert\",\"session_name\":\"demo-session\",\"status\":\"in_progress\",\"objective\":\"Finalize the workspace-state runtime.\",\"scope\":[\"add missing tools\"],\"evidence_roots\":[\"variant-1/src\",\"variant-1/tests\"]}",
     );
-    defer task_call.deinit(std.testing.allocator);
-    const task_output = try VAR1.tools.execute(std.testing.allocator, execCtx(workspace_root), task_call);
-    defer std.testing.allocator.free(task_output);
-    try std.testing.expect(std.mem.indexOf(u8, task_output, "demo-task") != null);
+    defer session_call.deinit(std.testing.allocator);
+    const session_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execCtx(workspace_root), session_call);
+    defer std.testing.allocator.free(session_output);
+    try std.testing.expect(std.mem.indexOf(u8, session_output, "demo-session") != null);
 
     var todo_call = try makeToolCall(
         std.testing.allocator,
-        "harness_todo",
-        "{\"action\":\"upsert\",\"category\":\"feature\",\"task_name\":\"demo-task\",\"status\":\"done\",\"objective\":\"Ship the harness tools.\",\"dependencies\":[\"none\"],\"steps_taken\":[\"wired the runtime\"],\"blockers\":[],\"evidence\":[\"tests green\"]}",
+        "todo_slice",
+        "{\"action\":\"upsert\",\"category\":\"feature\",\"todo_name\":\"demo-todo\",\"status\":\"done\",\"objective\":\"Ship the workspace-state tools.\",\"dependencies\":[\"none\"],\"steps_taken\":[\"wired the runtime\"],\"blockers\":[],\"evidence\":[\"tests green\"]}",
     );
     defer todo_call.deinit(std.testing.allocator);
-    const todo_output = try VAR1.tools.execute(std.testing.allocator, execCtx(workspace_root), todo_call);
+    const todo_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execCtx(workspace_root), todo_call);
     defer std.testing.allocator.free(todo_output);
     try std.testing.expect(std.mem.indexOf(u8, todo_output, "todo-slice1.md") != null);
 
     var changelog_call = try makeToolCall(
         std.testing.allocator,
-        "harness_changelog",
-        "{\"action\":\"archive_todo\",\"category\":\"feature\",\"task_name\":\"demo-task\",\"slice_name\":\"todo-slice1.md\",\"log_entry\":\"- Completed demo-task tool finalization.\"}",
+        "changelog_ledger",
+        "{\"action\":\"archive_todo\",\"category\":\"feature\",\"todo_name\":\"demo-todo\",\"slice_name\":\"todo-slice1.md\",\"log_entry\":\"- Completed demo-todo tool finalization.\"}",
     );
     defer changelog_call.deinit(std.testing.allocator);
-    const changelog_output = try VAR1.tools.execute(std.testing.allocator, execCtx(workspace_root), changelog_call);
+    const changelog_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execCtx(workspace_root), changelog_call);
     defer std.testing.allocator.free(changelog_output);
     try std.testing.expect(std.mem.indexOf(u8, changelog_output, "ARCHIVED_TO") != null);
 
-    const archived_todo = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, ".var", "changelog", "demo-task", "todo-slice1.md" });
+    const archived_todo = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ workspace_root, ".var", "changelog", "demo-todo", "todo-slice1.md" });
     defer std.testing.allocator.free(archived_todo);
-    try std.testing.expect(VAR1.fsutil.fileExists(archived_todo));
+    try std.testing.expect(VAR1.shared.fsutil.fileExists(archived_todo));
 
     var memories_append = try makeToolCall(
         std.testing.allocator,
-        "harness_memories",
-        "{\"action\":\"append\",\"content\":\"- Learned that the root harness tools must stay inside .var/.\"}",
+        "memory_ledger",
+        "{\"action\":\"append\",\"content\":\"- Learned that the root workspace-state tools must stay inside .var/.\"}",
     );
     defer memories_append.deinit(std.testing.allocator);
-    const memories_append_output = try VAR1.tools.execute(std.testing.allocator, execCtx(workspace_root), memories_append);
+    const memories_append_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execCtx(workspace_root), memories_append);
     defer std.testing.allocator.free(memories_append_output);
     try std.testing.expect(std.mem.indexOf(u8, memories_append_output, "APPENDED_BYTES") != null);
 
-    var memories_read = try makeToolCall(std.testing.allocator, "harness_memories", "{\"action\":\"read\"}");
+    var memories_read = try makeToolCall(std.testing.allocator, "memory_ledger", "{\"action\":\"read\"}");
     defer memories_read.deinit(std.testing.allocator);
-    const memories_read_output = try VAR1.tools.execute(std.testing.allocator, execCtx(workspace_root), memories_read);
+    const memories_read_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execCtx(workspace_root), memories_read);
     defer std.testing.allocator.free(memories_read_output);
-    try std.testing.expect(std.mem.indexOf(u8, memories_read_output, "root harness tools") != null);
+    try std.testing.expect(std.mem.indexOf(u8, memories_read_output, "root workspace-state tools") != null);
     try std.testing.expect(std.mem.indexOf(u8, memories_read_output, ".var/") != null);
 
     var research_write = try makeToolCall(
         std.testing.allocator,
-        "harness_research",
+        "research_artifact",
         "{\"action\":\"write\",\"path\":\"snapshot.md\",\"title\":\"Snapshot\",\"content\":\"U1 runtime snapshot\"}",
     );
     defer research_write.deinit(std.testing.allocator);
-    const research_write_output = try VAR1.tools.execute(std.testing.allocator, execCtx(workspace_root), research_write);
+    const research_write_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execCtx(workspace_root), research_write);
     defer std.testing.allocator.free(research_write_output);
     try std.testing.expect(std.mem.indexOf(u8, research_write_output, "snapshot.md") != null);
 
     var docs_write = try makeToolCall(
         std.testing.allocator,
-        "harness_docs",
+        "docs_artifact",
         "{\"action\":\"write\",\"path\":\"extra.md\",\"content\":\"# Extra\\n\\nContract note.\"}",
     );
     defer docs_write.deinit(std.testing.allocator);
-    const docs_write_output = try VAR1.tools.execute(std.testing.allocator, execCtx(workspace_root), docs_write);
+    const docs_write_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execCtx(workspace_root), docs_write);
     defer std.testing.allocator.free(docs_write_output);
     try std.testing.expect(std.mem.indexOf(u8, docs_write_output, "extra.md") != null);
 }
@@ -503,7 +481,7 @@ test "instruction_ingestion resolves the applicable AGENTS chain" {
         "{\"mode\":\"session-start\",\"target_path\":\"apps/feature\"}",
     );
     defer ingest_call.deinit(std.testing.allocator);
-    const ingest_output = try VAR1.tools.execute(std.testing.allocator, execCtx(workspace_root), ingest_call);
+    const ingest_output = try VAR1.core.tool_runtime.execute(std.testing.allocator, execCtx(workspace_root), ingest_call);
     defer std.testing.allocator.free(ingest_output);
 
     try std.testing.expect(std.mem.indexOf(u8, ingest_output, "MODE session-start") != null);
@@ -511,7 +489,7 @@ test "instruction_ingestion resolves the applicable AGENTS chain" {
     try std.testing.expect(std.mem.indexOf(u8, ingest_output, "feature agents") != null);
 }
 
-test "backup and worktree harness tools use the command runner contract" {
+test "backup and worktree workspace-state tools use the command runner contract" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -521,9 +499,9 @@ test "backup and worktree harness tools use the command runner contract" {
     var backup_context = RecorderCommandContext{ .allocator = std.testing.allocator };
     defer backup_context.deinit();
 
-    var backup_call = try makeToolCall(std.testing.allocator, "harness_backup", "{\"label\":\"checkpoint\"}");
+    var backup_call = try makeToolCall(std.testing.allocator, "workspace_backup", "{\"label\":\"checkpoint\"}");
     defer backup_call.deinit(std.testing.allocator);
-    const backup_output = try VAR1.tools.executeWithRunner(std.testing.allocator, execCtx(workspace_root), backup_call, .{
+    const backup_output = try VAR1.core.tool_runtime.executeWithRunner(std.testing.allocator, execCtx(workspace_root), backup_call, .{
         .context = &backup_context,
         .runFn = mockBackupRunner,
     });
@@ -539,9 +517,9 @@ test "backup and worktree harness tools use the command runner contract" {
     var worktree_context = RecorderCommandContext{ .allocator = std.testing.allocator };
     defer worktree_context.deinit();
 
-    var worktree_call = try makeToolCall(std.testing.allocator, "harness_worktree", "{\"action\":\"status\"}");
+    var worktree_call = try makeToolCall(std.testing.allocator, "git_worktree", "{\"action\":\"status\"}");
     defer worktree_call.deinit(std.testing.allocator);
-    const worktree_output = try VAR1.tools.executeWithRunner(std.testing.allocator, execCtx(workspace_root), worktree_call, .{
+    const worktree_output = try VAR1.core.tool_runtime.executeWithRunner(std.testing.allocator, execCtx(workspace_root), worktree_call, .{
         .context = &worktree_context,
         .runFn = mockNonGitRunner,
     });
@@ -551,10 +529,10 @@ test "backup and worktree harness tools use the command runner contract" {
     try std.testing.expect(std.mem.indexOf(u8, worktree_output, "WORKTREE_STATUS disabled") != null);
 }
 
-test "tool execution errors include schema guidance for harness todo calls" {
-    const error_payload = try VAR1.tools.renderExecutionError(
+test "tool execution errors include schema guidance for todo slice calls" {
+    const error_payload = try VAR1.core.tool_runtime.renderExecutionError(
         std.testing.allocator,
-        "harness_todo",
+        "todo_slice",
         "InvalidArguments",
         "{\"action\":\"upsert\"}",
     );
@@ -566,7 +544,7 @@ test "tool execution errors include schema guidance for harness todo calls" {
 }
 
 test "tool execution errors include search_files contract details for file-not-found loops" {
-    const error_payload = try VAR1.tools.renderExecutionError(
+    const error_payload = try VAR1.core.tool_runtime.renderExecutionError(
         std.testing.allocator,
         "search_files",
         "FileNotFound",
@@ -580,29 +558,29 @@ test "tool execution errors include search_files contract details for file-not-f
     try std.testing.expect(std.mem.indexOf(u8, error_payload, "iex executable") != null);
 }
 
-test "catalog keeps harness tools out of normal coding contexts" {
-    const catalog = try VAR1.tools.renderCatalog(std.testing.allocator, .{
+test "catalog keeps workspace-state tools out of normal coding contexts" {
+    const catalog = try VAR1.core.tool_runtime.renderCatalog(std.testing.allocator, .{
         .workspace_root = ".",
     });
     defer std.testing.allocator.free(catalog);
 
     try std.testing.expect(std.mem.indexOf(u8, catalog, "read_file") != null);
-    try std.testing.expect(std.mem.indexOf(u8, catalog, "harness_todo") == null);
+    try std.testing.expect(std.mem.indexOf(u8, catalog, "todo_slice") == null);
 }
 
-test "catalog enables harness tools only for harness-relevant contexts" {
-    const catalog = try VAR1.tools.renderCatalog(std.testing.allocator, .{
+test "catalog enables workspace-state tools only for workspace-state contexts" {
+    const catalog = try VAR1.core.tool_runtime.renderCatalog(std.testing.allocator, .{
         .workspace_root = ".",
-        .harness_tools_enabled = true,
+        .workspace_state_enabled = true,
     });
     defer std.testing.allocator.free(catalog);
 
-    try std.testing.expect(std.mem.indexOf(u8, catalog, "harness_todo") != null);
-    try std.testing.expect(std.mem.indexOf(u8, catalog, "init_harness") != null);
+    try std.testing.expect(std.mem.indexOf(u8, catalog, "todo_slice") != null);
+    try std.testing.expect(std.mem.indexOf(u8, catalog, "init_workspace") != null);
 }
 
 test "catalog json exposes schema and example objects for default coding tools" {
-    const catalog = try VAR1.tools.renderCatalogJson(std.testing.allocator, .{
+    const catalog = try VAR1.core.tool_runtime.renderCatalogJson(std.testing.allocator, .{
         .workspace_root = ".",
     });
     defer std.testing.allocator.free(catalog);
@@ -612,13 +590,13 @@ test "catalog json exposes schema and example objects for default coding tools" 
     try std.testing.expect(std.mem.indexOf(u8, catalog, "\"name\":\"search_files\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, catalog, "\"parameters_schema\":{") != null);
     try std.testing.expect(std.mem.indexOf(u8, catalog, "\"type\": \"object\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, catalog, "\"contract_example\":{\"path\":\"src/tools.zig\",\"start_line\":1,\"end_line\":80}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, catalog, "\"contract_example\":{\"path\":\"src/core/tools/runtime.zig\",\"start_line\":1,\"end_line\":80}") != null);
     try std.testing.expect(std.mem.indexOf(u8, catalog, "\"usage_hint\":\"Pass a file path, not a directory.") != null);
-    try std.testing.expect(std.mem.indexOf(u8, catalog, "\"name\":\"harness_todo\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, catalog, "\"name\":\"todo_slice\"") == null);
 }
 
 test "agent system prompt teaches schema repair and file-tool roles" {
-    const prompt = try VAR1.tools.buildAgentSystemPrompt(std.testing.allocator, .{
+    const prompt = try VAR1.core.tool_runtime.buildAgentSystemPrompt(std.testing.allocator, .{
         .workspace_root = ".",
     });
     defer std.testing.allocator.free(prompt);
@@ -633,14 +611,14 @@ test "agent system prompt teaches schema repair and file-tool roles" {
 }
 
 test "tool call summary masks child supervision tool names in logs" {
-    var calls = [_]VAR1.types.ToolCall{
+    var calls = [_]VAR1.shared.types.ToolCall{
         try makeToolCall(std.testing.allocator, "launch_agent", "{}"),
         try makeToolCall(std.testing.allocator, "wait_agent", "{}"),
         try makeToolCall(std.testing.allocator, "read_file", "{}"),
     };
     defer for (calls) |call| call.deinit(std.testing.allocator);
 
-    const summary = try VAR1.tools.renderToolCallSummary(std.testing.allocator, calls[0..]);
+    const summary = try VAR1.core.tool_runtime.renderToolCallSummary(std.testing.allocator, calls[0..]);
     defer std.testing.allocator.free(summary);
 
     try std.testing.expect(std.mem.indexOf(u8, summary, "child_run_dispatch") != null);

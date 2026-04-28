@@ -1,6 +1,6 @@
 const std = @import("std");
-const store = @import("../../store.zig");
-const types = @import("../../types.zig");
+const store = @import("../sessions/store.zig");
+const types = @import("../../shared/types.zig");
 
 const summary_prefix =
     "The conversation history before this point was compacted into the following summary:\n\n";

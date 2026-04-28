@@ -1,24 +1,24 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const fsutil = @import("fsutil.zig");
-const types = @import("types.zig");
+const fsutil = @import("../../shared/fsutil.zig");
+const types = @import("../../shared/types.zig");
 
 pub const definitions = [_]types.ToolDefinition{
     .{
-        .name = "init_harness",
+        .name = "init_workspace",
         .description = "Scaffold the canonical .var structure for the current workspace without overwriting existing populated files unless explicitly forced.",
         .parameters_json =
         \\{
         \\  "type": "object",
         \\  "properties": {
-        \\    "force_overwrite": { "type": "boolean", "description": "When true, overwrite the scaffold files owned by init_harness." }
+        \\    "force_overwrite": { "type": "boolean", "description": "When true, overwrite the scaffold files owned by init_workspace." }
         \\  },
         \\  "additionalProperties": false
         \\}
         ,
     },
     .{
-        .name = "harness_memories",
+        .name = "memory_ledger",
         .description = "Read or append the canonical .var memories ledger.",
         .parameters_json =
         \\{
@@ -33,8 +33,8 @@ pub const definitions = [_]types.ToolDefinition{
         ,
     },
     .{
-        .name = "harness_changelog",
-        .description = "Read or append the canonical .var changelog log, or archive a completed todo slice into .var/changelog/<task-name>/.",
+        .name = "changelog_ledger",
+        .description = "Read or append the canonical .var changelog log, or archive a completed todo slice into .var/changelog/<todo-name>/.",
         .parameters_json =
         \\{
         \\  "type": "object",
@@ -42,7 +42,7 @@ pub const definitions = [_]types.ToolDefinition{
         \\    "action": { "type": "string", "enum": ["read", "append", "archive_todo"] },
         \\    "content": { "type": "string", "description": "Markdown to append when action is append." },
         \\    "category": { "type": "string", "description": "Todo category when action is archive_todo." },
-        \\    "task_name": { "type": "string", "description": "Task slug when action is archive_todo." },
+        \\    "todo_name": { "type": "string", "description": "Todo slug when action is archive_todo." },
         \\    "slice_name": { "type": "string", "description": "Todo filename when action is archive_todo. Defaults to todo-slice1.md." },
         \\    "log_entry": { "type": "string", "description": "Optional changelog bullet to append after archive_todo succeeds." }
         \\  },
@@ -52,15 +52,15 @@ pub const definitions = [_]types.ToolDefinition{
         ,
     },
     .{
-        .name = "harness_todo",
-        .description = "Read or upsert a canonical .var todo slice under .var/todos/<category>/<task-name>/. The runtime already manages the current run's own todo slice, so use this only for explicit repo-level execution slices.",
+        .name = "todo_slice",
+        .description = "Read or upsert a canonical .var todo slice under .var/todos/<category>/<todo-name>/. The runtime already manages the current run's own todo slice, so use this only for explicit repo-level execution slices.",
         .parameters_json =
         \\{
         \\  "type": "object",
         \\  "properties": {
         \\    "action": { "type": "string", "enum": ["read", "upsert"] },
         \\    "category": { "type": "string" },
-        \\    "task_name": { "type": "string" },
+        \\    "todo_name": { "type": "string" },
         \\    "slice_name": { "type": "string", "description": "Todo filename. Defaults to todo-slice1.md." },
         \\    "status": { "type": "string" },
         \\    "objective": { "type": "string" },
@@ -69,32 +69,32 @@ pub const definitions = [_]types.ToolDefinition{
         \\    "blockers": { "type": "array", "items": { "type": "string" } },
         \\    "evidence": { "type": "array", "items": { "type": "string" } }
         \\  },
-        \\  "required": ["action", "category", "task_name"],
+        \\  "required": ["action", "category", "todo_name"],
         \\  "additionalProperties": false
         \\}
         ,
     },
     .{
-        .name = "harness_task",
-        .description = "Read or upsert a canonical .var session record under .var/sessions/<task-name>/session.md.",
+        .name = "session_record",
+        .description = "Read or upsert a canonical .var session record under .var/sessions/<session-name>/session.md.",
         .parameters_json =
         \\{
         \\  "type": "object",
         \\  "properties": {
         \\    "action": { "type": "string", "enum": ["read", "upsert"] },
-        \\    "task_name": { "type": "string" },
+        \\    "session_name": { "type": "string" },
         \\    "status": { "type": "string" },
         \\    "objective": { "type": "string" },
         \\    "scope": { "type": "array", "items": { "type": "string" } },
         \\    "evidence_roots": { "type": "array", "items": { "type": "string" } }
         \\  },
-        \\  "required": ["action", "task_name"],
+        \\  "required": ["action", "session_name"],
         \\  "additionalProperties": false
         \\}
         ,
     },
     .{
-        .name = "harness_research",
+        .name = "research_artifact",
         .description = "Read or write research artifacts under .var/research/.",
         .parameters_json =
         \\{
@@ -111,8 +111,8 @@ pub const definitions = [_]types.ToolDefinition{
         ,
     },
     .{
-        .name = "harness_docs",
-        .description = "Read or write canonical harness contract docs under .var/docs/.",
+        .name = "docs_artifact",
+        .description = "Read or write canonical runtime contract docs under .var/docs/.",
         .parameters_json =
         \\{
         \\  "type": "object",
@@ -127,7 +127,7 @@ pub const definitions = [_]types.ToolDefinition{
         ,
     },
     .{
-        .name = "harness_worktree",
+        .name = "git_worktree",
         .description = "Inspect or manage Git worktrees rooted under .var/worktrees/ when the workspace is a real Git checkout.",
         .parameters_json =
         \\{
@@ -145,7 +145,7 @@ pub const definitions = [_]types.ToolDefinition{
         ,
     },
     .{
-        .name = "harness_backup",
+        .name = "workspace_backup",
         .description = "Create a timestamped workspace backup archive under .var/backup/.",
         .parameters_json =
         \\{
@@ -188,32 +188,32 @@ pub fn execute(
     arguments_json: []const u8,
     runner: anytype,
 ) ![]u8 {
-    if (std.mem.eql(u8, tool_name, "init_harness")) {
-        return executeInitHarness(allocator, workspace_root, arguments_json);
+    if (std.mem.eql(u8, tool_name, "init_workspace")) {
+        return executeInitWorkspace(allocator, workspace_root, arguments_json);
     }
-    if (std.mem.eql(u8, tool_name, "harness_memories")) {
-        return executeHarnessMemories(allocator, workspace_root, arguments_json);
+    if (std.mem.eql(u8, tool_name, "memory_ledger")) {
+        return executeMemoryLedger(allocator, workspace_root, arguments_json);
     }
-    if (std.mem.eql(u8, tool_name, "harness_changelog")) {
-        return executeHarnessChangelog(allocator, workspace_root, arguments_json);
+    if (std.mem.eql(u8, tool_name, "changelog_ledger")) {
+        return executeChangelogLedger(allocator, workspace_root, arguments_json);
     }
-    if (std.mem.eql(u8, tool_name, "harness_todo")) {
-        return executeHarnessTodo(allocator, workspace_root, arguments_json);
+    if (std.mem.eql(u8, tool_name, "todo_slice")) {
+        return executeTodoSlice(allocator, workspace_root, arguments_json);
     }
-    if (std.mem.eql(u8, tool_name, "harness_task")) {
-        return executeHarnessTask(allocator, workspace_root, arguments_json);
+    if (std.mem.eql(u8, tool_name, "session_record")) {
+        return executeSessionRecord(allocator, workspace_root, arguments_json);
     }
-    if (std.mem.eql(u8, tool_name, "harness_research")) {
-        return executeHarnessResearch(allocator, workspace_root, arguments_json);
+    if (std.mem.eql(u8, tool_name, "research_artifact")) {
+        return executeResearchArtifact(allocator, workspace_root, arguments_json);
     }
-    if (std.mem.eql(u8, tool_name, "harness_docs")) {
-        return executeHarnessDocs(allocator, workspace_root, arguments_json);
+    if (std.mem.eql(u8, tool_name, "docs_artifact")) {
+        return executeDocsArtifact(allocator, workspace_root, arguments_json);
     }
-    if (std.mem.eql(u8, tool_name, "harness_worktree")) {
-        return executeHarnessWorktree(allocator, workspace_root, arguments_json, runner);
+    if (std.mem.eql(u8, tool_name, "git_worktree")) {
+        return executeGitWorktree(allocator, workspace_root, arguments_json, runner);
     }
-    if (std.mem.eql(u8, tool_name, "harness_backup")) {
-        return executeHarnessBackup(allocator, workspace_root, arguments_json, runner);
+    if (std.mem.eql(u8, tool_name, "workspace_backup")) {
+        return executeWorkspaceBackup(allocator, workspace_root, arguments_json, runner);
     }
     if (std.mem.eql(u8, tool_name, "instruction_ingestion")) {
         return executeInstructionIngestion(allocator, workspace_root, arguments_json);
@@ -222,7 +222,7 @@ pub fn execute(
     return error.UnknownTool;
 }
 
-fn harnessRootPath(allocator: std.mem.Allocator, workspace_root: []const u8) ![]u8 {
+fn workspaceStateRootPath(allocator: std.mem.Allocator, workspace_root: []const u8) ![]u8 {
     return fsutil.join(allocator, &.{ workspace_root, ".var" });
 }
 
@@ -254,23 +254,23 @@ fn todoPath(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
     category: []const u8,
-    task_name: []const u8,
+    todo_name: []const u8,
     slice_name: []const u8,
 ) ![]u8 {
-    return fsutil.join(allocator, &.{ workspace_root, ".var", "todos", category, task_name, slice_name });
+    return fsutil.join(allocator, &.{ workspace_root, ".var", "todos", category, todo_name, slice_name });
 }
 
 fn changelogSlicePath(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
-    task_name: []const u8,
+    todo_name: []const u8,
     slice_name: []const u8,
 ) ![]u8 {
-    return fsutil.join(allocator, &.{ workspace_root, ".var", "changelog", task_name, slice_name });
+    return fsutil.join(allocator, &.{ workspace_root, ".var", "changelog", todo_name, slice_name });
 }
 
-fn taskPath(allocator: std.mem.Allocator, workspace_root: []const u8, task_name: []const u8) ![]u8 {
-    return fsutil.join(allocator, &.{ workspace_root, ".var", "sessions", task_name, "session.md" });
+fn sessionDocPath(allocator: std.mem.Allocator, workspace_root: []const u8, session_name: []const u8) ![]u8 {
+    return fsutil.join(allocator, &.{ workspace_root, ".var", "sessions", session_name, "session.md" });
 }
 
 fn researchPath(allocator: std.mem.Allocator, workspace_root: []const u8, relative_path: []const u8) ![]u8 {
@@ -346,7 +346,7 @@ fn writeTemplateFile(path: []const u8, content: []const u8, force_overwrite: boo
     stats.files_written += 1;
 }
 
-fn defaultHarnessReadme() []const u8 {
+fn defaultWorkspaceReadme() []const u8 {
     const content =
         \\# .var
         \\
@@ -354,9 +354,9 @@ fn defaultHarnessReadme() []const u8 {
         \\
         \\## Ownership
         \\
-        \\- `.var/` owns live task, todo, changelog, memory, research, docs, backup, and worktree state for the harness.
+        \\- `.var/` owns live session, todo, changelog, memory, research, docs, backup, and worktree state for VAR1.
         \\- `.docs/` remains readable repo documentation or preserved historical material when present.
-        \\- `init_harness` owns the default scaffold. Other harness tools operate inside that canonical tree and do not create a parallel system.
+        \\- `init_workspace` owns the default scaffold. Other workspace-state tools operate inside that canonical tree and do not create a parallel system.
     ;
     return content;
 }
@@ -374,7 +374,7 @@ fn defaultMemoriesFile() []const u8 {
 
 fn defaultChangelogFile() []const u8 {
     const content =
-        \\# Harness Changelog Log
+        \\# VAR1 Changelog Log
         \\
     ;
     return content;
@@ -387,11 +387,11 @@ fn defaultDocsIndex() []const u8 {
         \\- [architecture.md](./architecture.md)
         \\  Canonical directory hierarchy, process flow, and runtime ownership boundary.
         \\- [tool-contracts.md](./tool-contracts.md)
-        \\  Canonical tool contracts for the root harness runtime.
+        \\  Canonical tool contracts for the workspace runtime.
         \\
         \\## Current Rule
         \\
-        \\Use `.var/` for live harness/process state. Use `.docs/` for readable repo documentation and preserved legacy artifacts.
+        \\Use `.var/` for live runtime/process state. Use `.docs/` for readable repo documentation.
     ;
     return content;
 }
@@ -402,7 +402,7 @@ fn defaultDocsArchitecture() []const u8 {
         \\
         \\## Runtime Boundary
         \\
-        \\The active workspace root is the default mutation boundary. The harness must not create a second live runtime or a second state ledger outside `.var/`.
+        \\The active workspace root is the default mutation boundary. VAR1 must not create a second live runtime or a second state ledger outside `.var/`.
         \\
         \\## Canonical Tree
         \\
@@ -413,15 +413,15 @@ fn defaultDocsArchitecture() []const u8 {
         \\      memories.md
         \\    changelog/
         \\      _log.md
-        \\      <task-name>/
+        \\      <todo-name>/
         \\        todo-slice*.md
         \\    todos/
         \\      <category>/
-        \\        <task-name>/
-        \\          todo-slice*.md
-        \\    sessions/
-        \\      <task-name>/
-        \\        session.md
+    \\        <todo-name>/
+    \\          todo-slice*.md
+    \\    sessions/
+    \\      <session-name>/
+    \\        session.md
         \\    auth/
         \\      auth.json
         \\    research/
@@ -435,8 +435,8 @@ fn defaultDocsArchitecture() []const u8 {
         \\
         \\## Tool Runtime
         \\
-        \\- `init_harness` scaffolds the canonical structure.
-        \\- Harness-domain tools operate inside `.var/` only.
+        \\- `init_workspace` scaffolds the canonical structure.
+        \\- Workspace-state tools operate inside `.var/` only.
         \\- Consumer runtimes such as `VAR1` must project through the root contract instead of inventing a parallel system.
     ;
     return content;
@@ -454,19 +454,19 @@ fn defaultToolContracts() []const u8 {
         \\
         \\## Required Domain Tools
         \\
-        \\- `harness_memories`
-        \\- `harness_changelog`
-        \\- `harness_todo`
-        \\- `harness_task`
-        \\- `harness_research`
-        \\- `harness_docs`
-        \\- `harness_worktree`
-        \\- `harness_backup`
+        \\- `memory_ledger`
+        \\- `changelog_ledger`
+        \\- `todo_slice`
+        \\- `session_record`
+        \\- `research_artifact`
+        \\- `docs_artifact`
+        \\- `git_worktree`
+        \\- `workspace_backup`
         \\- `instruction_ingestion`
         \\
         \\Rule:
-        \\- every harness-domain tool operates inside `.var/`
-        \\- tools may be used only when relevant to the task
+        \\- every workspace-state tool operates inside `.var/`
+        \\- tools may be used only when relevant to the request
         \\- no tool may create a parallel state system
     ;
     return content;
@@ -476,7 +476,7 @@ fn defaultWorktreesReadme() []const u8 {
     const content =
         \\# .var Worktrees
         \\
-        \\Use `harness_worktree` to manage Git worktrees under this directory when the workspace is a real Git checkout.
+        \\Use `git_worktree` to manage Git worktrees under this directory when the workspace is a real Git checkout.
     ;
     return content;
 }
@@ -485,7 +485,7 @@ fn defaultBackupReadme() []const u8 {
     const content =
         \\# .var Backup
         \\
-        \\Use `harness_backup` to create timestamped workspace archives before destructive operations or large migrations.
+        \\Use `workspace_backup` to create timestamped workspace archives before destructive operations or large migrations.
     ;
     return content;
 }
@@ -499,11 +499,11 @@ fn defaultResearchReadme() []const u8 {
     return content;
 }
 
-fn scaffoldHarness(allocator: std.mem.Allocator, workspace_root: []const u8, force_overwrite: bool) !ScaffoldStats {
+fn scaffoldWorkspace(allocator: std.mem.Allocator, workspace_root: []const u8, force_overwrite: bool) !ScaffoldStats {
     var stats = ScaffoldStats{};
 
     const directories = [_][]const u8{
-        try harnessRootPath(allocator, workspace_root),
+        try workspaceStateRootPath(allocator, workspace_root),
         try fsutil.join(allocator, &.{ workspace_root, ".var", "memories" }),
         try fsutil.join(allocator, &.{ workspace_root, ".var", "changelog" }),
         try fsutil.join(allocator, &.{ workspace_root, ".var", "docs" }),
@@ -517,7 +517,7 @@ fn scaffoldHarness(allocator: std.mem.Allocator, workspace_root: []const u8, for
         try fsutil.join(allocator, &.{ workspace_root, ".var", "todos", "chore" }),
         try fsutil.join(allocator, &.{ workspace_root, ".var", "todos", "fix" }),
         try fsutil.join(allocator, &.{ workspace_root, ".var", "todos", "refactor" }),
-        try fsutil.join(allocator, &.{ workspace_root, ".var", "todos", "task" }),
+        try fsutil.join(allocator, &.{ workspace_root, ".var", "todos", "general" }),
     };
     defer for (directories) |path| allocator.free(path);
 
@@ -543,7 +543,7 @@ fn scaffoldHarness(allocator: std.mem.Allocator, workspace_root: []const u8, for
     const docs_contracts = try docsToolContractsPath(allocator, workspace_root);
     defer allocator.free(docs_contracts);
 
-    try writeTemplateFile(readme, defaultHarnessReadme(), force_overwrite, &stats);
+    try writeTemplateFile(readme, defaultWorkspaceReadme(), force_overwrite, &stats);
     try writeTemplateFile(memories, defaultMemoriesFile(), force_overwrite, &stats);
     try writeTemplateFile(changelog, defaultChangelogFile(), force_overwrite, &stats);
     try writeTemplateFile(docs_index, defaultDocsIndex(), force_overwrite, &stats);
@@ -571,9 +571,9 @@ fn renderMarkdownList(
     return output.toOwnedSlice();
 }
 
-fn renderTaskRecord(
+fn renderSessionRecord(
     allocator: std.mem.Allocator,
-    task_name: []const u8,
+    session_name: []const u8,
     status: []const u8,
     objective: []const u8,
     scope: []const []const u8,
@@ -604,7 +604,7 @@ fn renderTaskRecord(
         \\{s}
     ,
         .{
-            task_name,
+            session_name,
             status,
             objective,
             scope_text,
@@ -661,7 +661,7 @@ fn renderTodoSlice(
     );
 }
 
-fn executeInitHarness(
+fn executeInitWorkspace(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
     arguments_json: []const u8,
@@ -675,7 +675,7 @@ fn executeInitHarness(
     });
     defer parsed.deinit();
 
-    const stats = try scaffoldHarness(allocator, workspace_root, parsed.value.force_overwrite);
+    const stats = try scaffoldWorkspace(allocator, workspace_root, parsed.value.force_overwrite);
     const content = try std.fmt.allocPrint(
         allocator,
         "ROOT {s}\nDIRECTORIES_ENSURED {d}\nFILES_WRITTEN {d}\nFILES_SKIPPED {d}",
@@ -683,10 +683,10 @@ fn executeInitHarness(
     );
     defer allocator.free(content);
 
-    return okEnvelope(allocator, "init_harness", content);
+    return okEnvelope(allocator, "init_workspace", content);
 }
 
-fn executeHarnessMemories(
+fn executeMemoryLedger(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
     arguments_json: []const u8,
@@ -711,7 +711,7 @@ fn executeHarnessMemories(
         defer allocator.free(content);
         const payload = try std.fmt.allocPrint(allocator, "PATH {s}\n{s}", .{ file_path, content });
         defer allocator.free(payload);
-        return okEnvelope(allocator, "harness_memories", payload);
+        return okEnvelope(allocator, "memory_ledger", payload);
     }
 
     if (std.mem.eql(u8, parsed.value.action, "append")) {
@@ -719,13 +719,13 @@ fn executeHarnessMemories(
         try appendMarkdownBlock(allocator, file_path, content);
         const payload = try std.fmt.allocPrint(allocator, "PATH {s}\nAPPENDED_BYTES {d}", .{ file_path, content.len });
         defer allocator.free(payload);
-        return okEnvelope(allocator, "harness_memories", payload);
+        return okEnvelope(allocator, "memory_ledger", payload);
     }
 
     return error.InvalidArguments;
 }
 
-fn executeHarnessChangelog(
+fn executeChangelogLedger(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
     arguments_json: []const u8,
@@ -734,7 +734,7 @@ fn executeHarnessChangelog(
         action: []const u8,
         content: ?[]const u8 = null,
         category: ?[]const u8 = null,
-        task_name: ?[]const u8 = null,
+        todo_name: ?[]const u8 = null,
         slice_name: ?[]const u8 = "todo-slice1.md",
         log_entry: ?[]const u8 = null,
     };
@@ -754,7 +754,7 @@ fn executeHarnessChangelog(
         defer allocator.free(content);
         const payload = try std.fmt.allocPrint(allocator, "PATH {s}\n{s}", .{ file_path, content });
         defer allocator.free(payload);
-        return okEnvelope(allocator, "harness_changelog", payload);
+        return okEnvelope(allocator, "changelog_ledger", payload);
     }
 
     if (std.mem.eql(u8, parsed.value.action, "append")) {
@@ -762,18 +762,18 @@ fn executeHarnessChangelog(
         try appendMarkdownBlock(allocator, file_path, content);
         const payload = try std.fmt.allocPrint(allocator, "PATH {s}\nAPPENDED_BYTES {d}", .{ file_path, content.len });
         defer allocator.free(payload);
-        return okEnvelope(allocator, "harness_changelog", payload);
+        return okEnvelope(allocator, "changelog_ledger", payload);
     }
 
     if (std.mem.eql(u8, parsed.value.action, "archive_todo")) {
         const category = parsed.value.category orelse return error.InvalidArguments;
-        const task_name = parsed.value.task_name orelse return error.InvalidArguments;
+        const todo_name = parsed.value.todo_name orelse return error.InvalidArguments;
         const slice_name = parsed.value.slice_name orelse "todo-slice1.md";
-        if (!isSafeSegment(category) or !isSafeSegment(task_name) or !isSafeSegment(slice_name)) return error.InvalidArguments;
+        if (!isSafeSegment(category) or !isSafeSegment(todo_name) or !isSafeSegment(slice_name)) return error.InvalidArguments;
 
-        const source_path = try todoPath(allocator, workspace_root, category, task_name, slice_name);
+        const source_path = try todoPath(allocator, workspace_root, category, todo_name, slice_name);
         defer allocator.free(source_path);
-        const destination_path = try changelogSlicePath(allocator, workspace_root, task_name, slice_name);
+        const destination_path = try changelogSlicePath(allocator, workspace_root, todo_name, slice_name);
         defer allocator.free(destination_path);
 
         const todo_contents = try fsutil.readTextAlloc(allocator, source_path);
@@ -789,13 +789,13 @@ fn executeHarnessChangelog(
             .{ source_path, destination_path },
         );
         defer allocator.free(payload);
-        return okEnvelope(allocator, "harness_changelog", payload);
+        return okEnvelope(allocator, "changelog_ledger", payload);
     }
 
     return error.InvalidArguments;
 }
 
-fn executeHarnessTodo(
+fn executeTodoSlice(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
     arguments_json: []const u8,
@@ -803,7 +803,7 @@ fn executeHarnessTodo(
     const Args = struct {
         action: []const u8,
         category: []const u8,
-        task_name: []const u8,
+        todo_name: []const u8,
         slice_name: []const u8 = "todo-slice1.md",
         status: ?[]const u8 = null,
         objective: ?[]const u8 = null,
@@ -818,11 +818,11 @@ fn executeHarnessTodo(
     });
     defer parsed.deinit();
 
-    if (!isSafeSegment(parsed.value.category) or !isSafeSegment(parsed.value.task_name) or !isSafeSegment(parsed.value.slice_name)) {
+    if (!isSafeSegment(parsed.value.category) or !isSafeSegment(parsed.value.todo_name) or !isSafeSegment(parsed.value.slice_name)) {
         return error.InvalidArguments;
     }
 
-    const file_path = try todoPath(allocator, workspace_root, parsed.value.category, parsed.value.task_name, parsed.value.slice_name);
+    const file_path = try todoPath(allocator, workspace_root, parsed.value.category, parsed.value.todo_name, parsed.value.slice_name);
     defer allocator.free(file_path);
 
     if (std.mem.eql(u8, parsed.value.action, "read")) {
@@ -830,7 +830,7 @@ fn executeHarnessTodo(
         defer allocator.free(content);
         const payload = try std.fmt.allocPrint(allocator, "PATH {s}\n{s}", .{ file_path, content });
         defer allocator.free(payload);
-        return okEnvelope(allocator, "harness_todo", payload);
+        return okEnvelope(allocator, "todo_slice", payload);
     }
 
     if (std.mem.eql(u8, parsed.value.action, "upsert")) {
@@ -849,20 +849,20 @@ fn executeHarnessTodo(
         try fsutil.writeText(file_path, rendered);
         const payload = try std.fmt.allocPrint(allocator, "PATH {s}\nBYTES {d}", .{ file_path, rendered.len });
         defer allocator.free(payload);
-        return okEnvelope(allocator, "harness_todo", payload);
+        return okEnvelope(allocator, "todo_slice", payload);
     }
 
     return error.InvalidArguments;
 }
 
-fn executeHarnessTask(
+fn executeSessionRecord(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
     arguments_json: []const u8,
 ) ![]u8 {
     const Args = struct {
         action: []const u8,
-        task_name: []const u8,
+        session_name: []const u8,
         status: ?[]const u8 = null,
         objective: ?[]const u8 = null,
         scope: []const []const u8 = &.{},
@@ -874,9 +874,9 @@ fn executeHarnessTask(
     });
     defer parsed.deinit();
 
-    if (!isSafeSegment(parsed.value.task_name)) return error.InvalidArguments;
+    if (!isSafeSegment(parsed.value.session_name)) return error.InvalidArguments;
 
-    const file_path = try taskPath(allocator, workspace_root, parsed.value.task_name);
+    const file_path = try sessionDocPath(allocator, workspace_root, parsed.value.session_name);
     defer allocator.free(file_path);
 
     if (std.mem.eql(u8, parsed.value.action, "read")) {
@@ -884,13 +884,13 @@ fn executeHarnessTask(
         defer allocator.free(content);
         const payload = try std.fmt.allocPrint(allocator, "PATH {s}\n{s}", .{ file_path, content });
         defer allocator.free(payload);
-        return okEnvelope(allocator, "harness_task", payload);
+        return okEnvelope(allocator, "session_record", payload);
     }
 
     if (std.mem.eql(u8, parsed.value.action, "upsert")) {
-        const rendered = try renderTaskRecord(
+        const rendered = try renderSessionRecord(
             allocator,
-            parsed.value.task_name,
+            parsed.value.session_name,
             parsed.value.status orelse return error.InvalidArguments,
             parsed.value.objective orelse return error.InvalidArguments,
             parsed.value.scope,
@@ -901,29 +901,29 @@ fn executeHarnessTask(
         try fsutil.writeText(file_path, rendered);
         const payload = try std.fmt.allocPrint(allocator, "PATH {s}\nBYTES {d}", .{ file_path, rendered.len });
         defer allocator.free(payload);
-        return okEnvelope(allocator, "harness_task", payload);
+        return okEnvelope(allocator, "session_record", payload);
     }
 
     return error.InvalidArguments;
 }
 
-fn executeHarnessResearch(
+fn executeResearchArtifact(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
     arguments_json: []const u8,
 ) ![]u8 {
-    return executeHarnessBodyFileTool(allocator, workspace_root, arguments_json, "harness_research", researchPath);
+    return executeBodyFileTool(allocator, workspace_root, arguments_json, "research_artifact", researchPath);
 }
 
-fn executeHarnessDocs(
+fn executeDocsArtifact(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
     arguments_json: []const u8,
 ) ![]u8 {
-    return executeHarnessBodyFileTool(allocator, workspace_root, arguments_json, "harness_docs", docsPath);
+    return executeBodyFileTool(allocator, workspace_root, arguments_json, "docs_artifact", docsPath);
 }
 
-fn executeHarnessBodyFileTool(
+fn executeBodyFileTool(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
     arguments_json: []const u8,
@@ -970,7 +970,7 @@ fn executeHarnessBodyFileTool(
     return error.InvalidArguments;
 }
 
-fn executeHarnessWorktree(
+fn executeGitWorktree(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
     arguments_json: []const u8,
@@ -992,7 +992,7 @@ fn executeHarnessWorktree(
     if (!try workspaceIsGitCheckout(allocator, workspace_root, runner)) {
         const payload = try allocator.dupe(u8, "WORKTREE_STATUS disabled\nREASON workspace is not a Git checkout");
         defer allocator.free(payload);
-        return okEnvelope(allocator, "harness_worktree", payload);
+        return okEnvelope(allocator, "git_worktree", payload);
     }
 
     if (std.mem.eql(u8, parsed.value.action, "status")) {
@@ -1001,21 +1001,21 @@ fn executeHarnessWorktree(
         if (list_output.exit_code != 0) return error.CommandFailed;
         const payload = try std.fmt.allocPrint(allocator, "WORKTREE_STATUS ready\n{s}", .{list_output.stdout});
         defer allocator.free(payload);
-        return okEnvelope(allocator, "harness_worktree", payload);
+        return okEnvelope(allocator, "git_worktree", payload);
     }
 
     if (std.mem.eql(u8, parsed.value.action, "list")) {
         const list_output = try runner.run(allocator, workspace_root, &.{ "git", "worktree", "list", "--porcelain" });
         defer list_output.deinit(allocator);
         if (list_output.exit_code != 0) return error.CommandFailed;
-        return okEnvelope(allocator, "harness_worktree", list_output.stdout);
+        return okEnvelope(allocator, "git_worktree", list_output.stdout);
     }
 
     if (std.mem.eql(u8, parsed.value.action, "prune")) {
         const prune_output = try runner.run(allocator, workspace_root, &.{ "git", "worktree", "prune", "-v" });
         defer prune_output.deinit(allocator);
         if (prune_output.exit_code != 0) return error.CommandFailed;
-        return okEnvelope(allocator, "harness_worktree", prune_output.stdout);
+        return okEnvelope(allocator, "git_worktree", prune_output.stdout);
     }
 
     const name = parsed.value.name orelse return error.InvalidArguments;
@@ -1043,7 +1043,7 @@ fn executeHarnessWorktree(
         if (add_output.exit_code != 0) return error.CommandFailed;
         const payload = try std.fmt.allocPrint(allocator, "PATH {s}\n{s}", .{ worktree_path, add_output.stdout });
         defer allocator.free(payload);
-        return okEnvelope(allocator, "harness_worktree", payload);
+        return okEnvelope(allocator, "git_worktree", payload);
     }
 
     if (std.mem.eql(u8, parsed.value.action, "remove")) {
@@ -1058,7 +1058,7 @@ fn executeHarnessWorktree(
         const remove_output = try runner.run(allocator, workspace_root, argv.items);
         defer remove_output.deinit(allocator);
         if (remove_output.exit_code != 0) return error.CommandFailed;
-        return okEnvelope(allocator, "harness_worktree", remove_output.stdout);
+        return okEnvelope(allocator, "git_worktree", remove_output.stdout);
     }
 
     if (std.mem.eql(u8, parsed.value.action, "lock")) {
@@ -1076,13 +1076,13 @@ fn executeHarnessWorktree(
         const lock_output = try runner.run(allocator, workspace_root, argv.items);
         defer lock_output.deinit(allocator);
         if (lock_output.exit_code != 0) return error.CommandFailed;
-        return okEnvelope(allocator, "harness_worktree", lock_output.stdout);
+        return okEnvelope(allocator, "git_worktree", lock_output.stdout);
     }
 
     return error.InvalidArguments;
 }
 
-fn executeHarnessBackup(
+fn executeWorkspaceBackup(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
     arguments_json: []const u8,
@@ -1133,7 +1133,7 @@ fn executeHarnessBackup(
 
     const payload = try std.fmt.allocPrint(allocator, "PATH {s}\n{s}", .{ destination, result.stdout });
     defer allocator.free(payload);
-    return okEnvelope(allocator, "harness_backup", payload);
+    return okEnvelope(allocator, "workspace_backup", payload);
 }
 
 fn executeInstructionIngestion(

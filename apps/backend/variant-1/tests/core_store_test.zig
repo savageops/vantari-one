@@ -8,13 +8,13 @@ fn tmpWorkspacePath(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir) ![]u
 fn makeConfig(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
-    harness_max_steps: usize,
-) !VAR1.types.Config {
+    max_steps: usize,
+) !VAR1.shared.types.Config {
     return .{
         .openai_base_url = try allocator.dupe(u8, "http://127.0.0.1:1234"),
         .openai_api_key = try allocator.dupe(u8, "test-key"),
         .openai_model = try allocator.dupe(u8, "gemma-4-e2b-it"),
-        .harness_max_steps = harness_max_steps,
+        .max_steps = max_steps,
         .workspace_root = try allocator.dupe(u8, workspace_root),
     };
 }
@@ -25,7 +25,7 @@ fn makeContextCheckpoint(
     source_seq_end: u64,
     first_kept_seq: u64,
     summary: []const u8,
-) !VAR1.types.ContextCheckpoint {
+) !VAR1.shared.types.ContextCheckpoint {
     return .{
         .id = try allocator.dupe(u8, id),
         .entry_type = try allocator.dupe(u8, "summary_checkpoint"),
@@ -47,10 +47,10 @@ test "config loader reads variant env values" {
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    const env_path = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, ".env" });
+    const env_path = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ workspace_root, ".env" });
     defer std.testing.allocator.free(env_path);
 
-    try VAR1.fsutil.writeText(env_path,
+    try VAR1.shared.fsutil.writeText(env_path,
         \\BASE_URL=http://127.0.0.1:1234
         \\API_KEY=test-key
         \\MODEL=test-model
@@ -59,13 +59,13 @@ test "config loader reads variant env values" {
         \\
     );
 
-    const config = try VAR1.config.loadFromEnvFile(std.testing.allocator, env_path);
+    const config = try VAR1.core.config.loadFromEnvFile(std.testing.allocator, env_path);
     defer config.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("http://127.0.0.1:1234", config.openai_base_url);
     try std.testing.expectEqualStrings("test-key", config.openai_api_key);
     try std.testing.expectEqualStrings("test-model", config.openai_model);
-    try std.testing.expectEqual(@as(usize, 4), config.harness_max_steps);
+    try std.testing.expectEqual(@as(usize, 4), config.max_steps);
 }
 
 test "config loader rejects missing required keys" {
@@ -75,16 +75,16 @@ test "config loader rejects missing required keys" {
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    const env_path = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, ".env" });
+    const env_path = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ workspace_root, ".env" });
     defer std.testing.allocator.free(env_path);
 
-    try VAR1.fsutil.writeText(env_path,
+    try VAR1.shared.fsutil.writeText(env_path,
         \\BASE_URL=http://127.0.0.1:1234
         \\MODEL=test-model
         \\
     );
 
-    try std.testing.expectError(VAR1.config.Error.MissingKey, VAR1.config.loadFromEnvFile(std.testing.allocator, env_path));
+    try std.testing.expectError(VAR1.core.config.Error.MissingKey, VAR1.core.config.loadFromEnvFile(std.testing.allocator, env_path));
 }
 
 test "config loader ignores commented backup provider entries" {
@@ -94,10 +94,10 @@ test "config loader ignores commented backup provider entries" {
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    const env_path = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, ".env" });
+    const env_path = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ workspace_root, ".env" });
     defer std.testing.allocator.free(env_path);
 
-    try VAR1.fsutil.writeText(env_path,
+    try VAR1.shared.fsutil.writeText(env_path,
         \\# Backup local provider
         \\# BASE_URL=http://127.0.0.1:1234
         \\# API_KEY=local-key
@@ -110,13 +110,13 @@ test "config loader ignores commented backup provider entries" {
         \\
     );
 
-    const config = try VAR1.config.loadFromEnvFile(std.testing.allocator, env_path);
+    const config = try VAR1.core.config.loadFromEnvFile(std.testing.allocator, env_path);
     defer config.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("https://api.z.ai/api/coding/paas/v4", config.openai_base_url);
     try std.testing.expectEqualStrings("active-key", config.openai_api_key);
     try std.testing.expectEqualStrings("GLM-5.1", config.openai_model);
-    try std.testing.expectEqual(@as(usize, 10), config.harness_max_steps);
+    try std.testing.expectEqual(@as(usize, 10), config.max_steps);
 }
 
 test "loadDefault canonicalizes relative workspace root to an absolute current directory" {
@@ -126,10 +126,10 @@ test "loadDefault canonicalizes relative workspace root to an absolute current d
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    const env_path = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, ".env" });
+    const env_path = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ workspace_root, ".env" });
     defer std.testing.allocator.free(env_path);
 
-    try VAR1.fsutil.writeText(env_path,
+    try VAR1.shared.fsutil.writeText(env_path,
         \\BASE_URL=http://127.0.0.1:1234
         \\API_KEY=test-key
         \\MODEL=test-model
@@ -147,7 +147,7 @@ test "loadDefault canonicalizes relative workspace root to an absolute current d
     const expected_root = try std.fs.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(expected_root);
 
-    const config = try VAR1.config.loadDefault(std.testing.allocator, ".");
+    const config = try VAR1.core.config.loadDefault(std.testing.allocator, ".");
     defer config.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings(expected_root, config.workspace_root);
@@ -160,10 +160,10 @@ test "loadDefault seeds canonical auth state from env and then prefers auth ledg
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    const env_path = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, ".env" });
+    const env_path = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ workspace_root, ".env" });
     defer std.testing.allocator.free(env_path);
 
-    try VAR1.fsutil.writeText(env_path,
+    try VAR1.shared.fsutil.writeText(env_path,
         \\BASE_URL=https://api.z.ai/api/coding/paas/v4
         \\API_KEY=env-key
         \\MODEL=GLM-5.1
@@ -178,18 +178,18 @@ test "loadDefault seeds canonical auth state from env and then prefers auth ledg
 
     try std.process.changeCurDir(workspace_root);
 
-    const seeded_config = try VAR1.config.loadDefault(std.testing.allocator, ".");
+    const seeded_config = try VAR1.core.config.loadDefault(std.testing.allocator, ".");
     defer seeded_config.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("env-key", seeded_config.openai_api_key);
     try std.testing.expectEqualStrings("zai", seeded_config.auth_provider.?);
     try std.testing.expectEqualStrings("GLM-5.1", seeded_config.subscription_plan_label.?);
 
-    const auth_path = try VAR1.auth_store.authFilePath(std.testing.allocator, seeded_config.workspace_root);
+    const auth_path = try VAR1.core.auth_store.authFilePath(std.testing.allocator, seeded_config.workspace_root);
     defer std.testing.allocator.free(auth_path);
-    try std.testing.expect(VAR1.fsutil.fileExists(auth_path));
+    try std.testing.expect(VAR1.shared.fsutil.fileExists(auth_path));
 
-    try VAR1.fsutil.writeText(auth_path,
+    try VAR1.shared.fsutil.writeText(auth_path,
         \\{
         \\  "version": 1,
         \\  "active_provider": "zai",
@@ -213,7 +213,7 @@ test "loadDefault seeds canonical auth state from env and then prefers auth ledg
         \\
     );
 
-    const ledger_config = try VAR1.config.loadDefault(std.testing.allocator, ".");
+    const ledger_config = try VAR1.core.config.loadDefault(std.testing.allocator, ".");
     defer ledger_config.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("ledger-key", ledger_config.openai_api_key);
@@ -237,10 +237,10 @@ test "resolveInWorkspace anchors dot workspace roots against cwd" {
     const expected_root = try std.fs.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(expected_root);
 
-    const expected_path = try VAR1.fsutil.join(std.testing.allocator, &.{ expected_root, "playground", "hero-page-exercise", "index.html" });
+    const expected_path = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ expected_root, "playground", "hero-page-exercise", "index.html" });
     defer std.testing.allocator.free(expected_path);
 
-    const resolved_path = try VAR1.fsutil.resolveInWorkspace(
+    const resolved_path = try VAR1.shared.fsutil.resolveInWorkspace(
         std.testing.allocator,
         ".",
         "playground/hero-page-exercise/index.html",
@@ -249,8 +249,8 @@ test "resolveInWorkspace anchors dot workspace roots against cwd" {
 
     try std.testing.expectEqualStrings(expected_path, resolved_path);
     try std.testing.expectError(
-        VAR1.fsutil.PathError.PathOutsideWorkspace,
-        VAR1.fsutil.resolveInWorkspace(std.testing.allocator, ".", "../escape.txt"),
+        VAR1.shared.fsutil.PathError.PathOutsideWorkspace,
+        VAR1.shared.fsutil.resolveInWorkspace(std.testing.allocator, ".", "../escape.txt"),
     );
 }
 
@@ -261,25 +261,25 @@ test "store writes session json and event entries" {
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    var session = try VAR1.store.initSession(std.testing.allocator, workspace_root, "Count the letters.");
+    var session = try VAR1.core.session_store.initSession(std.testing.allocator, workspace_root, "Count the letters.");
     defer session.deinit(std.testing.allocator);
 
-    const session_dir = try VAR1.store.sessionDirPath(std.testing.allocator, workspace_root, session.id);
+    const session_dir = try VAR1.core.session_store.sessionDirPath(std.testing.allocator, workspace_root, session.id);
     defer std.testing.allocator.free(session_dir);
 
-    const session_json = try VAR1.fsutil.join(std.testing.allocator, &.{ session_dir, "session.json" });
+    const session_json = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ session_dir, "session.json" });
     defer std.testing.allocator.free(session_json);
-    try std.testing.expect(VAR1.fsutil.fileExists(session_json));
+    try std.testing.expect(VAR1.shared.fsutil.fileExists(session_json));
 
-    try VAR1.store.appendEvent(std.testing.allocator, workspace_root, session.id, .{
+    try VAR1.core.session_store.appendEvent(std.testing.allocator, workspace_root, session.id, .{
         .event_type = "session_started",
         .message = "Session initialized.",
         .timestamp_ms = std.time.milliTimestamp(),
     });
 
-    const events_path = try VAR1.fsutil.join(std.testing.allocator, &.{ session_dir, "events.jsonl" });
+    const events_path = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ session_dir, "events.jsonl" });
     defer std.testing.allocator.free(events_path);
-    const events = try VAR1.fsutil.readTextAlloc(std.testing.allocator, events_path);
+    const events = try VAR1.shared.fsutil.readTextAlloc(std.testing.allocator, events_path);
     defer std.testing.allocator.free(events);
 
     try std.testing.expect(std.mem.indexOf(u8, events, "session_started") != null);
@@ -292,63 +292,63 @@ test "store can list sessions newest first and read full event history" {
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    var first = try VAR1.store.initSession(std.testing.allocator, workspace_root, "first prompt");
+    var first = try VAR1.core.session_store.initSession(std.testing.allocator, workspace_root, "first prompt");
     defer first.deinit(std.testing.allocator);
     std.Thread.sleep(2 * std.time.ns_per_ms);
-    var second = try VAR1.store.initSession(std.testing.allocator, workspace_root, "second prompt");
+    var second = try VAR1.core.session_store.initSession(std.testing.allocator, workspace_root, "second prompt");
     defer second.deinit(std.testing.allocator);
 
-    try VAR1.store.appendEvent(std.testing.allocator, workspace_root, second.id, .{
+    try VAR1.core.session_store.appendEvent(std.testing.allocator, workspace_root, second.id, .{
         .event_type = "session_started",
         .message = "Session initialized.",
         .timestamp_ms = std.time.milliTimestamp(),
     });
-    try VAR1.store.appendEvent(std.testing.allocator, workspace_root, second.id, .{
+    try VAR1.core.session_store.appendEvent(std.testing.allocator, workspace_root, second.id, .{
         .event_type = "assistant_response",
         .message = "Done.",
         .timestamp_ms = std.time.milliTimestamp(),
     });
 
-    const sessions = try VAR1.store.listSessionRecords(std.testing.allocator, workspace_root);
-    defer VAR1.types.deinitSessionRecords(std.testing.allocator, sessions);
+    const sessions = try VAR1.core.session_store.listSessionRecords(std.testing.allocator, workspace_root);
+    defer VAR1.shared.types.deinitSessionRecords(std.testing.allocator, sessions);
 
     try std.testing.expect(sessions.len >= 2);
     try std.testing.expectEqualStrings(second.id, sessions[0].id);
 
-    const events = try VAR1.store.readEvents(std.testing.allocator, workspace_root, second.id);
-    defer VAR1.types.deinitSessionEvents(std.testing.allocator, events);
+    const events = try VAR1.core.session_store.readEvents(std.testing.allocator, workspace_root, second.id);
+    defer VAR1.shared.types.deinitSessionEvents(std.testing.allocator, events);
 
     try std.testing.expectEqual(@as(usize, 2), events.len);
     try std.testing.expectEqualStrings("session_started", events[0].event_type);
     try std.testing.expectEqualStrings("assistant_response", events[1].event_type);
 }
 
-test "event readers skip corrupted legacy lines" {
+test "event readers skip corrupted jsonl lines" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    var session = try VAR1.store.initSession(std.testing.allocator, workspace_root, "legacy prompt");
+    var session = try VAR1.core.session_store.initSession(std.testing.allocator, workspace_root, "event prompt");
     defer session.deinit(std.testing.allocator);
 
-    const events_path = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, ".var", "sessions", session.id, "events.jsonl" });
+    const events_path = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ workspace_root, ".var", "sessions", session.id, "events.jsonl" });
     defer std.testing.allocator.free(events_path);
 
-    try VAR1.fsutil.writeText(
+    try VAR1.shared.fsutil.writeText(
         events_path,
         "2133419}\n" ++
             "{\"event_type\":\"assistant_response\",\"message\":\"3\",\"timestamp_ms\":123}\n",
     );
 
-    const latest = try VAR1.store.readLatestEvent(std.testing.allocator, workspace_root, session.id);
+    const latest = try VAR1.core.session_store.readLatestEvent(std.testing.allocator, workspace_root, session.id);
     defer if (latest) |event| event.deinit(std.testing.allocator);
     try std.testing.expect(latest != null);
     try std.testing.expectEqualStrings("assistant_response", latest.?.event_type);
 
-    const events = try VAR1.store.readEvents(std.testing.allocator, workspace_root, session.id);
-    defer VAR1.types.deinitSessionEvents(std.testing.allocator, events);
+    const events = try VAR1.core.session_store.readEvents(std.testing.allocator, workspace_root, session.id);
+    defer VAR1.shared.types.deinitSessionEvents(std.testing.allocator, events);
     try std.testing.expectEqual(@as(usize, 1), events.len);
     try std.testing.expectEqualStrings("assistant_response", events[0].event_type);
 }
@@ -360,10 +360,10 @@ test "initSession produces unique ids for adjacent sessions" {
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    var first = try VAR1.store.initSession(std.testing.allocator, workspace_root, "first");
+    var first = try VAR1.core.session_store.initSession(std.testing.allocator, workspace_root, "first");
     defer first.deinit(std.testing.allocator);
 
-    var second = try VAR1.store.initSession(std.testing.allocator, workspace_root, "second");
+    var second = try VAR1.core.session_store.initSession(std.testing.allocator, workspace_root, "second");
     defer second.deinit(std.testing.allocator);
 
     try std.testing.expect(!std.mem.eql(u8, first.id, second.id));
@@ -376,24 +376,24 @@ test "store round-trips canonical child delegation metadata" {
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    var session = try VAR1.store.initSessionWithOptions(
+    var session = try VAR1.core.session_store.initSessionWithOptions(
         std.testing.allocator,
         workspace_root,
         "how many r in strawberry",
         .{
             .status = .initialized,
-            .parent_session_id = "task-parent",
+            .parent_session_id = "session-parent",
             .display_name = "berry-child",
             .agent_profile = "subagent",
         },
     );
     defer session.deinit(std.testing.allocator);
 
-    var loaded = try VAR1.store.readSessionRecord(std.testing.allocator, workspace_root, session.id);
+    var loaded = try VAR1.core.session_store.readSessionRecord(std.testing.allocator, workspace_root, session.id);
     defer loaded.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(VAR1.types.SessionStatus.initialized, loaded.status);
-    try std.testing.expectEqualStrings("task-parent", loaded.parent_session_id.?);
+    try std.testing.expectEqual(VAR1.shared.types.SessionStatus.initialized, loaded.status);
+    try std.testing.expectEqualStrings("session-parent", loaded.parent_session_id.?);
     try std.testing.expectEqualStrings("berry-child", loaded.display_name.?);
     try std.testing.expectEqualStrings("subagent", loaded.agent_profile.?);
 }
@@ -405,22 +405,22 @@ test "store round-trips canonical continuation lineage metadata" {
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    var session = try VAR1.store.initSessionWithOptions(
+    var session = try VAR1.core.session_store.initSessionWithOptions(
         std.testing.allocator,
         workspace_root,
         "follow-up prompt",
         .{
             .status = .initialized,
-            .continued_from_session_id = "task-prior",
+            .continued_from_session_id = "session-prior",
         },
     );
     defer session.deinit(std.testing.allocator);
 
-    var loaded = try VAR1.store.readSessionRecord(std.testing.allocator, workspace_root, session.id);
+    var loaded = try VAR1.core.session_store.readSessionRecord(std.testing.allocator, workspace_root, session.id);
     defer loaded.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(VAR1.types.SessionStatus.initialized, loaded.status);
-    try std.testing.expectEqualStrings("task-prior", loaded.continued_from_session_id.?);
+    try std.testing.expectEqual(VAR1.shared.types.SessionStatus.initialized, loaded.status);
+    try std.testing.expectEqualStrings("session-prior", loaded.continued_from_session_id.?);
 }
 
 test "store seeds and appends canonical session messages on the same session" {
@@ -430,63 +430,33 @@ test "store seeds and appends canonical session messages on the same session" {
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    var session = try VAR1.store.initSession(std.testing.allocator, workspace_root, "Initial prompt");
+    var session = try VAR1.core.session_store.initSession(std.testing.allocator, workspace_root, "Initial prompt");
     defer session.deinit(std.testing.allocator);
 
-    try VAR1.store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Initial answer", 200);
-    try VAR1.store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Follow-up prompt", 300);
-    try VAR1.store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Follow-up answer", 400);
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Initial answer", 200);
+    try VAR1.core.session_store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Follow-up prompt", 300);
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Follow-up answer", 400);
 
-    const messages = try VAR1.store.readSessionMessages(std.testing.allocator, workspace_root, session.id);
-    defer VAR1.types.deinitSessionMessages(std.testing.allocator, messages);
+    const messages = try VAR1.core.session_store.readSessionMessages(std.testing.allocator, workspace_root, session.id);
+    defer VAR1.shared.types.deinitSessionMessages(std.testing.allocator, messages);
 
     try std.testing.expectEqual(@as(usize, 4), messages.len);
     try std.testing.expectEqualStrings("msg-1", messages[0].id);
     try std.testing.expectEqual(@as(u64, 1), messages[0].seq);
-    try std.testing.expectEqual(VAR1.types.SessionMessageRole.user, messages[0].role);
+    try std.testing.expectEqual(VAR1.shared.types.SessionMessageRole.user, messages[0].role);
     try std.testing.expectEqualStrings("Initial prompt", messages[0].content);
     try std.testing.expectEqualStrings("msg-2", messages[1].id);
     try std.testing.expectEqual(@as(u64, 2), messages[1].seq);
-    try std.testing.expectEqual(VAR1.types.SessionMessageRole.assistant, messages[1].role);
+    try std.testing.expectEqual(VAR1.shared.types.SessionMessageRole.assistant, messages[1].role);
     try std.testing.expectEqualStrings("Initial answer", messages[1].content);
     try std.testing.expectEqualStrings("msg-3", messages[2].id);
     try std.testing.expectEqual(@as(u64, 3), messages[2].seq);
-    try std.testing.expectEqual(VAR1.types.SessionMessageRole.user, messages[2].role);
+    try std.testing.expectEqual(VAR1.shared.types.SessionMessageRole.user, messages[2].role);
     try std.testing.expectEqualStrings("Follow-up prompt", messages[2].content);
     try std.testing.expectEqualStrings("msg-4", messages[3].id);
     try std.testing.expectEqual(@as(u64, 4), messages[3].seq);
-    try std.testing.expectEqual(VAR1.types.SessionMessageRole.assistant, messages[3].role);
+    try std.testing.expectEqual(VAR1.shared.types.SessionMessageRole.assistant, messages[3].role);
     try std.testing.expectEqualStrings("Follow-up answer", messages[3].content);
-}
-
-test "store reads legacy message rows by assigning stable ids and sequence numbers" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
-    defer std.testing.allocator.free(workspace_root);
-
-    var session = try VAR1.store.initSession(std.testing.allocator, workspace_root, "Initial prompt");
-    defer session.deinit(std.testing.allocator);
-
-    const messages_path = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, ".var", "sessions", session.id, "messages.jsonl" });
-    defer std.testing.allocator.free(messages_path);
-    try VAR1.fsutil.writeText(
-        messages_path,
-        "{\"role\":\"user\",\"content\":\"old user\",\"timestamp_ms\":100}\n" ++
-            "{\"role\":\"assistant\",\"content\":\"old assistant\",\"timestamp_ms\":200}\n",
-    );
-
-    const messages = try VAR1.store.readSessionMessages(std.testing.allocator, workspace_root, session.id);
-    defer VAR1.types.deinitSessionMessages(std.testing.allocator, messages);
-
-    try std.testing.expectEqual(@as(usize, 2), messages.len);
-    try std.testing.expectEqualStrings("msg-1", messages[0].id);
-    try std.testing.expectEqual(@as(u64, 1), messages[0].seq);
-    try std.testing.expectEqualStrings("old user", messages[0].content);
-    try std.testing.expectEqualStrings("msg-2", messages[1].id);
-    try std.testing.expectEqual(@as(u64, 2), messages[1].seq);
-    try std.testing.expectEqualStrings("old assistant", messages[1].content);
 }
 
 test "store appends context checkpoints and reads the latest valid entry" {
@@ -496,22 +466,22 @@ test "store appends context checkpoints and reads the latest valid entry" {
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    var session = try VAR1.store.initSession(std.testing.allocator, workspace_root, "Initial prompt");
+    var session = try VAR1.core.session_store.initSession(std.testing.allocator, workspace_root, "Initial prompt");
     defer session.deinit(std.testing.allocator);
 
     var first = try makeContextCheckpoint(std.testing.allocator, "ctx-1", 2, 3, "Older summary.");
     defer first.deinit(std.testing.allocator);
-    try VAR1.store.appendContextCheckpoint(std.testing.allocator, workspace_root, session.id, first);
+    try VAR1.core.session_store.appendContextCheckpoint(std.testing.allocator, workspace_root, session.id, first);
 
     var second = try makeContextCheckpoint(std.testing.allocator, "ctx-2", 4, 5, "Latest summary.");
     defer second.deinit(std.testing.allocator);
-    try VAR1.store.appendContextCheckpoint(std.testing.allocator, workspace_root, session.id, second);
+    try VAR1.core.session_store.appendContextCheckpoint(std.testing.allocator, workspace_root, session.id, second);
 
-    const context_path = try VAR1.store.contextFilePath(std.testing.allocator, workspace_root, session.id);
+    const context_path = try VAR1.core.session_store.contextFilePath(std.testing.allocator, workspace_root, session.id);
     defer std.testing.allocator.free(context_path);
-    try VAR1.fsutil.appendText(context_path, "not valid json\n");
+    try VAR1.shared.fsutil.appendText(context_path, "not valid json\n");
 
-    const latest = try VAR1.store.readLatestContextCheckpoint(std.testing.allocator, workspace_root, session.id);
+    const latest = try VAR1.core.session_store.readLatestContextCheckpoint(std.testing.allocator, workspace_root, session.id);
     defer if (latest) |value| value.deinit(std.testing.allocator);
 
     try std.testing.expect(latest != null);
@@ -527,154 +497,233 @@ test "context builder emits latest summary plus recent raw transcript" {
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    var session = try VAR1.store.initSession(std.testing.allocator, workspace_root, "Initial prompt");
+    var session = try VAR1.core.session_store.initSession(std.testing.allocator, workspace_root, "Initial prompt");
     defer session.deinit(std.testing.allocator);
 
-    try VAR1.store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Initial answer", 200);
-    try VAR1.store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Follow-up prompt", 300);
-    try VAR1.store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Follow-up answer", 400);
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Initial answer", 200);
+    try VAR1.core.session_store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Follow-up prompt", 300);
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Follow-up answer", 400);
 
     var checkpoint = try makeContextCheckpoint(std.testing.allocator, "ctx-1", 2, 3, "Initial prompt was answered.");
     defer checkpoint.deinit(std.testing.allocator);
-    try VAR1.store.appendContextCheckpoint(std.testing.allocator, workspace_root, session.id, checkpoint);
+    try VAR1.core.session_store.appendContextCheckpoint(std.testing.allocator, workspace_root, session.id, checkpoint);
 
-    var provider_messages = std.array_list.Managed(VAR1.types.ChatMessage).init(std.testing.allocator);
+    var provider_messages = std.array_list.Managed(VAR1.shared.types.ChatMessage).init(std.testing.allocator);
     defer {
         for (provider_messages.items) |message| message.deinit(std.testing.allocator);
         provider_messages.deinit();
     }
 
-    try VAR1.context.appendProviderMessages(std.testing.allocator, workspace_root, &provider_messages, session);
+    try VAR1.core.context.appendProviderMessages(std.testing.allocator, workspace_root, &provider_messages, session);
 
     try std.testing.expectEqual(@as(usize, 3), provider_messages.items.len);
-    try std.testing.expectEqual(VAR1.types.MessageRole.user, provider_messages.items[0].role);
+    try std.testing.expectEqual(VAR1.shared.types.MessageRole.user, provider_messages.items[0].role);
     try std.testing.expect(std.mem.indexOf(u8, provider_messages.items[0].content.?, "Initial prompt was answered.") != null);
     try std.testing.expect(std.mem.indexOf(u8, provider_messages.items[0].content.?, "Initial prompt\n") == null);
     try std.testing.expectEqualStrings("Follow-up prompt", provider_messages.items[1].content.?);
     try std.testing.expectEqualStrings("Follow-up answer", provider_messages.items[2].content.?);
 }
 
-test "store falls back to legacy continuation lineage when messages are absent" {
+test "context compactor appends a structured checkpoint from stable sequence ranges" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    var first = try VAR1.store.initSessionWithOptions(
-        std.testing.allocator,
-        workspace_root,
-        "First prompt",
-        .{
-            .status = .completed,
-        },
-    );
-    defer first.deinit(std.testing.allocator);
-    try VAR1.store.writeOutput(std.testing.allocator, workspace_root, first.id, "First answer");
+    var session = try VAR1.core.session_store.initSession(std.testing.allocator, workspace_root, "Initial prompt");
+    defer session.deinit(std.testing.allocator);
 
-    var second = try VAR1.store.initSessionWithOptions(
-        std.testing.allocator,
-        workspace_root,
-        "Second prompt",
-        .{
-            .status = .completed,
-            .continued_from_session_id = first.id,
-        },
-    );
-    defer second.deinit(std.testing.allocator);
-    try VAR1.store.writeOutput(std.testing.allocator, workspace_root, second.id, "Second answer");
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Initial answer", 200);
+    try VAR1.core.session_store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Follow-up prompt", 300);
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Follow-up answer", 400);
+    try VAR1.core.session_store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Final prompt", 500);
 
-    const messages = try VAR1.store.readSessionMessages(std.testing.allocator, workspace_root, second.id);
-    defer VAR1.types.deinitSessionMessages(std.testing.allocator, messages);
+    const result = try VAR1.core.context.compactor.compactSession(std.testing.allocator, workspace_root, session.id, .{
+        .keep_recent_messages = 2,
+        .trigger = "manual-test",
+    });
+    defer result.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(usize, 4), messages.len);
-    try std.testing.expectEqualStrings("First prompt", messages[0].content);
-    try std.testing.expectEqualStrings("First answer", messages[1].content);
-    try std.testing.expectEqualStrings("Second prompt", messages[2].content);
-    try std.testing.expectEqualStrings("Second answer", messages[3].content);
+    try std.testing.expect(result.checkpoint != null);
+    try std.testing.expectEqual(@as(u64, 1), result.checkpoint.?.source_seq_start);
+    try std.testing.expectEqual(@as(u64, 3), result.checkpoint.?.source_seq_end);
+    try std.testing.expectEqual(@as(u64, 4), result.checkpoint.?.first_kept_seq);
+    try std.testing.expectEqual(@as(u16, 350), result.checkpoint.?.aggressiveness_milli);
+    try std.testing.expectEqual(@as(u32, 3), result.checkpoint.?.compacted_entry_count);
+    try std.testing.expectEqualStrings("manual-test", result.checkpoint.?.trigger);
+    try std.testing.expect(std.mem.indexOf(u8, result.checkpoint.?.summary, "VAR1 context checkpoint") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.checkpoint.?.summary, "segment_range: 1..3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.checkpoint.?.summary, "seq=1 role=user") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.checkpoint.?.summary, "seq=4 role=assistant") == null);
+
+    const latest = try VAR1.core.session_store.readLatestContextCheckpoint(std.testing.allocator, workspace_root, session.id);
+    defer if (latest) |checkpoint| checkpoint.deinit(std.testing.allocator);
+    try std.testing.expect(latest != null);
+    try std.testing.expectEqualStrings(result.checkpoint.?.id, latest.?.id);
 }
 
-test "store migrates legacy task layout into the canonical session contract" {
+test "context compactor advances from the prior checkpoint without duplicating the raw suffix" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    const legacy_dir = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, ".harness", "tasks", "task-legacy" });
-    defer std.testing.allocator.free(legacy_dir);
-
-    const legacy_task_json = try VAR1.fsutil.join(std.testing.allocator, &.{ legacy_dir, "task.json" });
-    defer std.testing.allocator.free(legacy_task_json);
-    const legacy_turns = try VAR1.fsutil.join(std.testing.allocator, &.{ legacy_dir, "turns.jsonl" });
-    defer std.testing.allocator.free(legacy_turns);
-    const legacy_journal = try VAR1.fsutil.join(std.testing.allocator, &.{ legacy_dir, "journal.jsonl" });
-    defer std.testing.allocator.free(legacy_journal);
-    const legacy_answer = try VAR1.fsutil.join(std.testing.allocator, &.{ legacy_dir, "answer.txt" });
-    defer std.testing.allocator.free(legacy_answer);
-
-    try VAR1.fsutil.writeText(legacy_task_json,
-        \\{
-        \\  "id": "task-legacy",
-        \\  "prompt": "What changed?",
-        \\  "status": "completed",
-        \\  "parent_task_id": "task-parent",
-        \\  "display_name": "legacy-child",
-        \\  "agent_profile": "subagent",
-        \\  "created_at_ms": 100,
-        \\  "updated_at_ms": 200
-        \\}
-        \\
-    );
-    try VAR1.fsutil.writeText(
-        legacy_turns,
-        "{\"role\":\"user\",\"content\":\"What changed?\",\"timestamp_ms\":100}\n" ++
-            "{\"role\":\"assistant\",\"content\":\"The store migrated.\",\"timestamp_ms\":200}\n",
-    );
-    try VAR1.fsutil.writeText(
-        legacy_journal,
-        "{\"event_type\":\"assistant_response\",\"message\":\"The store migrated.\",\"timestamp_ms\":200}\n",
-    );
-    try VAR1.fsutil.writeText(legacy_answer, "The store migrated.");
-
-    try VAR1.store.ensureStoreReady(std.testing.allocator, workspace_root);
-
-    const canonical_session_json = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, ".var", "sessions", "task-legacy", "session.json" });
-    defer std.testing.allocator.free(canonical_session_json);
-    const canonical_messages = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, ".var", "sessions", "task-legacy", "messages.jsonl" });
-    defer std.testing.allocator.free(canonical_messages);
-    const canonical_events = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, ".var", "sessions", "task-legacy", "events.jsonl" });
-    defer std.testing.allocator.free(canonical_events);
-    const canonical_output = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, ".var", "sessions", "task-legacy", "output.txt" });
-    defer std.testing.allocator.free(canonical_output);
-    const old_tasks_root = try VAR1.fsutil.join(std.testing.allocator, &.{ workspace_root, ".harness", "tasks" });
-    defer std.testing.allocator.free(old_tasks_root);
-
-    try std.testing.expect(VAR1.fsutil.fileExists(canonical_session_json));
-    try std.testing.expect(VAR1.fsutil.fileExists(canonical_messages));
-    try std.testing.expect(VAR1.fsutil.fileExists(canonical_events));
-    try std.testing.expect(VAR1.fsutil.fileExists(canonical_output));
-    try std.testing.expect(!VAR1.fsutil.fileExists(old_tasks_root));
-
-    var session = try VAR1.store.readSessionRecord(std.testing.allocator, workspace_root, "task-legacy");
+    var session = try VAR1.core.session_store.initSession(std.testing.allocator, workspace_root, "Initial prompt");
     defer session.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("task-parent", session.parent_session_id.?);
-    try std.testing.expectEqualStrings("legacy-child", session.display_name.?);
 
-    const messages = try VAR1.store.readSessionMessages(std.testing.allocator, workspace_root, "task-legacy");
-    defer VAR1.types.deinitSessionMessages(std.testing.allocator, messages);
-    try std.testing.expectEqual(@as(usize, 2), messages.len);
-    try std.testing.expectEqualStrings("The store migrated.", messages[1].content);
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Initial answer", 200);
+    try VAR1.core.session_store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Second prompt", 300);
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Second answer", 400);
 
-    const events = try VAR1.store.readEvents(std.testing.allocator, workspace_root, "task-legacy");
-    defer VAR1.types.deinitSessionEvents(std.testing.allocator, events);
-    try std.testing.expectEqual(@as(usize, 1), events.len);
-    try std.testing.expectEqualStrings("assistant_response", events[0].event_type);
+    const first = try VAR1.core.context.compactor.compactSession(std.testing.allocator, workspace_root, session.id, .{
+        .keep_recent_messages = 2,
+    });
+    defer first.deinit(std.testing.allocator);
+    try std.testing.expect(first.checkpoint != null);
+    try std.testing.expectEqual(@as(u64, 3), first.checkpoint.?.first_kept_seq);
 
-    const output = try VAR1.store.readOutput(std.testing.allocator, workspace_root, "task-legacy");
-    defer if (output) |value| std.testing.allocator.free(value);
-    try std.testing.expect(output != null);
-    try std.testing.expectEqualStrings("The store migrated.", output.?);
+    try VAR1.core.session_store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Third prompt", 500);
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Third answer", 600);
+
+    const second = try VAR1.core.context.compactor.compactSession(std.testing.allocator, workspace_root, session.id, .{
+        .keep_recent_messages = 2,
+    });
+    defer second.deinit(std.testing.allocator);
+
+    try std.testing.expect(second.checkpoint != null);
+    try std.testing.expectEqual(@as(u64, 1), second.checkpoint.?.source_seq_start);
+    try std.testing.expectEqual(@as(u64, 4), second.checkpoint.?.source_seq_end);
+    try std.testing.expectEqual(@as(u64, 5), second.checkpoint.?.first_kept_seq);
+    try std.testing.expect(std.mem.indexOf(u8, second.checkpoint.?.summary, "previous_summary:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second.checkpoint.?.summary, "seq=3 role=user") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second.checkpoint.?.summary, "seq=5 role=user") == null);
+}
+
+test "context compactor can advance by one jsonl entry per checkpoint" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
+    defer std.testing.allocator.free(workspace_root);
+
+    var session = try VAR1.core.session_store.initSession(std.testing.allocator, workspace_root, "Initial prompt");
+    defer session.deinit(std.testing.allocator);
+
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Initial answer", 200);
+    try VAR1.core.session_store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Second prompt", 300);
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Second answer", 400);
+    try VAR1.core.session_store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Final prompt", 500);
+
+    const first = try VAR1.core.context.compactor.compactSession(std.testing.allocator, workspace_root, session.id, .{
+        .keep_recent_messages = 1,
+        .max_entries_per_checkpoint = 1,
+    });
+    defer first.deinit(std.testing.allocator);
+
+    try std.testing.expect(first.checkpoint != null);
+    try std.testing.expectEqual(@as(u64, 1), first.checkpoint.?.source_seq_start);
+    try std.testing.expectEqual(@as(u64, 1), first.checkpoint.?.source_seq_end);
+    try std.testing.expectEqual(@as(u64, 2), first.checkpoint.?.first_kept_seq);
+    try std.testing.expectEqual(@as(u32, 1), first.checkpoint.?.compacted_entry_count);
+    try std.testing.expect(std.mem.indexOf(u8, first.checkpoint.?.summary, "segment_range: 1..1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first.checkpoint.?.summary, "seq=1 role=user") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first.checkpoint.?.summary, "seq=2 role=assistant") == null);
+
+    const second = try VAR1.core.context.compactor.compactSession(std.testing.allocator, workspace_root, session.id, .{
+        .keep_recent_messages = 1,
+        .max_entries_per_checkpoint = 1,
+    });
+    defer second.deinit(std.testing.allocator);
+
+    try std.testing.expect(second.checkpoint != null);
+    try std.testing.expectEqual(@as(u64, 1), second.checkpoint.?.source_seq_start);
+    try std.testing.expectEqual(@as(u64, 2), second.checkpoint.?.source_seq_end);
+    try std.testing.expectEqual(@as(u64, 3), second.checkpoint.?.first_kept_seq);
+    try std.testing.expectEqual(@as(u32, 1), second.checkpoint.?.compacted_entry_count);
+    try std.testing.expect(std.mem.indexOf(u8, second.checkpoint.?.summary, "previous_summary:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second.checkpoint.?.summary, "segment_range: 2..2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second.checkpoint.?.summary, "seq=2 role=assistant") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second.checkpoint.?.summary, "seq=3 role=user") == null);
+}
+
+test "context compactor recompacts an existing range when aggressiveness increases" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
+    defer std.testing.allocator.free(workspace_root);
+
+    var session = try VAR1.core.session_store.initSession(std.testing.allocator, workspace_root, "Initial prompt");
+    defer session.deinit(std.testing.allocator);
+
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Initial answer", 200);
+    try VAR1.core.session_store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Second prompt", 300);
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Second answer", 400);
+    try VAR1.core.session_store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Final prompt", 500);
+
+    const first = try VAR1.core.context.compactor.compactSession(std.testing.allocator, workspace_root, session.id, .{
+        .keep_recent_messages = 1,
+        .max_entries_per_checkpoint = 1,
+        .aggressiveness_milli = 350,
+    });
+    defer first.deinit(std.testing.allocator);
+    try std.testing.expect(first.checkpoint != null);
+    try std.testing.expectEqual(@as(u64, 1), first.checkpoint.?.source_seq_end);
+
+    const second = try VAR1.core.context.compactor.compactSession(std.testing.allocator, workspace_root, session.id, .{
+        .keep_recent_messages = 1,
+        .max_entries_per_checkpoint = 1,
+        .aggressiveness_milli = 700,
+    });
+    defer second.deinit(std.testing.allocator);
+
+    try std.testing.expect(second.checkpoint != null);
+    try std.testing.expectEqual(@as(u64, 1), second.checkpoint.?.source_seq_start);
+    try std.testing.expectEqual(@as(u64, 4), second.checkpoint.?.source_seq_end);
+    try std.testing.expectEqual(@as(u64, 5), second.checkpoint.?.first_kept_seq);
+    try std.testing.expectEqual(@as(u16, 700), second.checkpoint.?.aggressiveness_milli);
+    try std.testing.expectEqual(@as(u32, 4), second.checkpoint.?.compacted_entry_count);
+    try std.testing.expect(std.mem.indexOf(u8, second.checkpoint.?.summary, "replaces_checkpoint:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second.checkpoint.?.summary, "segment_range: 1..4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second.checkpoint.?.summary, "seq=4 role=assistant") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second.checkpoint.?.summary, "seq=5 role=user") == null);
+}
+
+test "context builder consumes checkpoints generated by the compactor" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
+    defer std.testing.allocator.free(workspace_root);
+
+    var session = try VAR1.core.session_store.initSession(std.testing.allocator, workspace_root, "Initial prompt");
+    defer session.deinit(std.testing.allocator);
+
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Initial answer", 200);
+    try VAR1.core.session_store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Follow-up prompt", 300);
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Follow-up answer", 400);
+    try VAR1.core.session_store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Final prompt", 500);
+
+    const result = try VAR1.core.context.compactor.compactSession(std.testing.allocator, workspace_root, session.id, .{
+        .keep_recent_messages = 2,
+    });
+    defer result.deinit(std.testing.allocator);
+
+    var provider_messages = std.array_list.Managed(VAR1.shared.types.ChatMessage).init(std.testing.allocator);
+    defer {
+        for (provider_messages.items) |message| message.deinit(std.testing.allocator);
+        provider_messages.deinit();
+    }
+
+    try VAR1.core.context.appendProviderMessages(std.testing.allocator, workspace_root, &provider_messages, session);
+
+    try std.testing.expectEqual(@as(usize, 3), provider_messages.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, provider_messages.items[0].content.?, "VAR1 context checkpoint") != null);
+    try std.testing.expect(std.mem.indexOf(u8, provider_messages.items[0].content.?, "Initial prompt") != null);
+    try std.testing.expectEqualStrings("Follow-up answer", provider_messages.items[1].content.?);
+    try std.testing.expectEqualStrings("Final prompt", provider_messages.items[2].content.?);
 }
 
 test "agent service resolves child session status from the canonical session store" {
@@ -687,44 +736,44 @@ test "agent service resolves child session status from the canonical session sto
     const config = try makeConfig(std.testing.allocator, workspace_root, 4);
     defer config.deinit(std.testing.allocator);
 
-    var completed = try VAR1.store.initSessionWithOptions(
+    var completed = try VAR1.core.session_store.initSessionWithOptions(
         std.testing.allocator,
         workspace_root,
         "how many r in strawberry",
         .{
             .status = .completed,
-            .parent_session_id = "task-parent",
+            .parent_session_id = "session-parent",
             .display_name = "berry-child",
             .agent_profile = "subagent",
         },
     );
     defer completed.deinit(std.testing.allocator);
-    try VAR1.store.writeOutput(std.testing.allocator, workspace_root, completed.id, "There are 3 r's in strawberry.");
-    try VAR1.store.appendEvent(std.testing.allocator, workspace_root, completed.id, .{
+    try VAR1.core.session_store.writeOutput(std.testing.allocator, workspace_root, completed.id, "There are 3 r's in strawberry.");
+    try VAR1.core.session_store.appendEvent(std.testing.allocator, workspace_root, completed.id, .{
         .event_type = "assistant_response",
         .message = "There are 3 r's in strawberry.",
         .timestamp_ms = std.time.milliTimestamp(),
     });
 
-    var running = try VAR1.store.initSessionWithOptions(
+    var running = try VAR1.core.session_store.initSessionWithOptions(
         std.testing.allocator,
         workspace_root,
         "Refine the hero page",
         .{
             .status = .running,
-            .parent_session_id = "task-parent",
+            .parent_session_id = "session-parent",
             .display_name = "hero-child",
             .agent_profile = "subagent",
         },
     );
     defer running.deinit(std.testing.allocator);
-    try VAR1.store.appendEvent(std.testing.allocator, workspace_root, running.id, .{
+    try VAR1.core.session_store.appendEvent(std.testing.allocator, workspace_root, running.id, .{
         .event_type = "tool_completed",
         .message = "tool completed: write_file",
         .timestamp_ms = std.time.milliTimestamp(),
     });
 
-    var unrelated = try VAR1.store.initSessionWithOptions(
+    var unrelated = try VAR1.core.session_store.initSessionWithOptions(
         std.testing.allocator,
         workspace_root,
         "ignore me",
@@ -737,38 +786,38 @@ test "agent service resolves child session status from the canonical session sto
     );
     defer unrelated.deinit(std.testing.allocator);
 
-    var service = VAR1.agents.Service.init(&config);
+    var service = VAR1.core.agent_runtime.Service.init(&config);
     const handle = service.handle();
 
-    const status_output = try handle.status(std.testing.allocator, "task-parent", "berry-child");
+    const status_output = try handle.status(std.testing.allocator, "session-parent", "berry-child");
     defer std.testing.allocator.free(status_output);
     try std.testing.expect(std.mem.indexOf(u8, status_output, "SESSION_ID") != null);
-    try std.testing.expect(std.mem.indexOf(u8, status_output, "PARENT_SESSION_ID task-parent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_output, "PARENT_SESSION_ID session-parent") != null);
     try std.testing.expect(std.mem.indexOf(u8, status_output, "OUTPUT There are 3 r's in strawberry.") != null);
     try std.testing.expect(std.mem.indexOf(u8, status_output, "LATEST_EVENT_TYPE assistant_response") != null);
     try std.testing.expect(std.mem.indexOf(u8, status_output, "TERMINAL true") != null);
     try std.testing.expect(std.mem.indexOf(u8, status_output, "LIFECYCLE_STATE completed") != null);
     try std.testing.expect(std.mem.indexOf(u8, status_output, "NEXT_PARENT_ACTION collect_result") != null);
 
-    const wait_output = try handle.wait(std.testing.allocator, "task-parent", "berry-child", 10);
+    const wait_output = try handle.wait(std.testing.allocator, "session-parent", "berry-child", 10);
     defer std.testing.allocator.free(wait_output);
     try std.testing.expect(std.mem.indexOf(u8, wait_output, "STATUS completed") != null);
     try std.testing.expect(std.mem.indexOf(u8, wait_output, "WAIT_STATE terminal") != null);
 
-    const running_status_output = try handle.status(std.testing.allocator, "task-parent", "hero-child");
+    const running_status_output = try handle.status(std.testing.allocator, "session-parent", "hero-child");
     defer std.testing.allocator.free(running_status_output);
     try std.testing.expect(std.mem.indexOf(u8, running_status_output, "LATEST_EVENT_MESSAGE tool completed: write_file") != null);
     try std.testing.expect(std.mem.indexOf(u8, running_status_output, "TERMINAL false") != null);
     try std.testing.expect(std.mem.indexOf(u8, running_status_output, "LIFECYCLE_STATE processing") != null);
     try std.testing.expect(std.mem.indexOf(u8, running_status_output, "HEARTBEAT_AGE_MS") != null);
 
-    const timeout_output = try handle.wait(std.testing.allocator, "task-parent", "hero-child", 1);
+    const timeout_output = try handle.wait(std.testing.allocator, "session-parent", "hero-child", 1);
     defer std.testing.allocator.free(timeout_output);
     try std.testing.expect(std.mem.indexOf(u8, timeout_output, "STATUS running") != null);
     try std.testing.expect(std.mem.indexOf(u8, timeout_output, "WAIT_STATE timeout") != null);
     try std.testing.expect(std.mem.indexOf(u8, timeout_output, "WAIT_TIMEOUT_MS 1") != null);
 
-    const list_output = try handle.list(std.testing.allocator, "task-parent");
+    const list_output = try handle.list(std.testing.allocator, "session-parent");
     defer std.testing.allocator.free(list_output);
     try std.testing.expect(std.mem.indexOf(u8, list_output, "berry-child") != null);
     try std.testing.expect(std.mem.indexOf(u8, list_output, "hero-child") != null);
@@ -786,34 +835,34 @@ test "docs sync writes pending sessions and archives completed sessions" {
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    const snapshot = VAR1.types.ProgressSnapshot{
-        .session_id = "task-123",
+    const snapshot = VAR1.shared.types.ProgressSnapshot{
+        .session_id = "session-123",
         .status = "running",
         .prompt = "how many r in strawberry",
         .output = "",
         .updated_at_ms = std.time.milliTimestamp(),
     };
 
-    try VAR1.docs_sync.writePending(std.testing.allocator, workspace_root, snapshot);
-    try VAR1.docs_sync.appendLog(std.testing.allocator, workspace_root, "started task-123");
+    try VAR1.core.docs_sync.writePending(std.testing.allocator, workspace_root, snapshot);
+    try VAR1.core.docs_sync.appendLog(std.testing.allocator, workspace_root, "started session-123");
 
-    const pending_path = try VAR1.docs_sync.todoSlicePath(std.testing.allocator, workspace_root, "task-123");
+    const pending_path = try VAR1.core.docs_sync.todoSlicePath(std.testing.allocator, workspace_root, "session-123");
     defer std.testing.allocator.free(pending_path);
-    try std.testing.expect(VAR1.fsutil.fileExists(pending_path));
+    try std.testing.expect(VAR1.shared.fsutil.fileExists(pending_path));
 
-    try VAR1.docs_sync.completeSession(std.testing.allocator, workspace_root, .{
-        .session_id = "task-123",
+    try VAR1.core.docs_sync.completeSession(std.testing.allocator, workspace_root, .{
+        .session_id = "session-123",
         .status = "completed",
         .prompt = "how many r in strawberry",
         .output = "There are 3 r's in strawberry.",
         .updated_at_ms = std.time.milliTimestamp(),
     });
 
-    const changelog_path = try VAR1.docs_sync.changelogSlicePath(std.testing.allocator, workspace_root, "task-123");
+    const changelog_path = try VAR1.core.docs_sync.changelogSlicePath(std.testing.allocator, workspace_root, "session-123");
     defer std.testing.allocator.free(changelog_path);
 
-    try std.testing.expect(!VAR1.fsutil.fileExists(pending_path));
-    try std.testing.expect(VAR1.fsutil.fileExists(changelog_path));
+    try std.testing.expect(!VAR1.shared.fsutil.fileExists(pending_path));
+    try std.testing.expect(VAR1.shared.fsutil.fileExists(changelog_path));
 }
 
 test "docs sync appends human-readable log entries" {
@@ -823,12 +872,12 @@ test "docs sync appends human-readable log entries" {
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    try VAR1.docs_sync.appendLog(std.testing.allocator, workspace_root, "example log event");
+    try VAR1.core.docs_sync.appendLog(std.testing.allocator, workspace_root, "example log event");
 
-    const log_path = try VAR1.docs_sync.runLogPath(std.testing.allocator, workspace_root);
+    const log_path = try VAR1.core.docs_sync.runLogPath(std.testing.allocator, workspace_root);
     defer std.testing.allocator.free(log_path);
 
-    const log_contents = try VAR1.fsutil.readTextAlloc(std.testing.allocator, log_path);
+    const log_contents = try VAR1.shared.fsutil.readTextAlloc(std.testing.allocator, log_path);
     defer std.testing.allocator.free(log_contents);
 
     try std.testing.expect(std.mem.indexOf(u8, log_contents, "example log event") != null);
@@ -841,13 +890,13 @@ test "docs sync reads the run log first and seeds memories when missing" {
     const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
     defer std.testing.allocator.free(workspace_root);
 
-    try VAR1.docs_sync.ensureRunStart(std.testing.allocator, workspace_root);
+    try VAR1.core.docs_sync.ensureRunStart(std.testing.allocator, workspace_root);
 
-    const log_path = try VAR1.docs_sync.runLogPath(std.testing.allocator, workspace_root);
+    const log_path = try VAR1.core.docs_sync.runLogPath(std.testing.allocator, workspace_root);
     defer std.testing.allocator.free(log_path);
-    try std.testing.expect(VAR1.fsutil.fileExists(log_path));
+    try std.testing.expect(VAR1.shared.fsutil.fileExists(log_path));
 
-    const memories_path = try VAR1.docs_sync.memoriesFilePath(std.testing.allocator, workspace_root);
+    const memories_path = try VAR1.core.docs_sync.memoriesFilePath(std.testing.allocator, workspace_root);
     defer std.testing.allocator.free(memories_path);
-    try std.testing.expect(VAR1.fsutil.fileExists(memories_path));
+    try std.testing.expect(VAR1.shared.fsutil.fileExists(memories_path));
 }

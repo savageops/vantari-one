@@ -1,10 +1,10 @@
 const std = @import("std");
-const agents = @import("agents.zig");
-const config = @import("config.zig");
-const protocol_types = @import("protocol_types.zig");
-const provider = @import("provider.zig");
-const stdio_rpc = @import("stdio_rpc.zig");
-const web = @import("web.zig");
+const agents = @import("../core/agents/service.zig");
+const config = @import("../core/config/resolver.zig");
+const protocol_types = @import("../shared/protocol/types.zig");
+const provider = @import("../core/providers/openai_compatible.zig");
+const stdio_rpc = @import("../host/stdio_rpc.zig");
+const web = @import("../host/http_bridge.zig");
 
 const RunCliOptions = struct {
     prompt: ?[]const u8 = null,
@@ -78,7 +78,7 @@ const ParsedToolsListResult = struct {
 };
 
 pub const root_help_text =
-    \\VAR1 Zig Harness
+    \\VAR1 Zig Kernel
     \\
     \\Usage:
     \\  VAR1 <command> [flags]
@@ -86,14 +86,14 @@ pub const root_help_text =
     \\Commands:
     \\  run      Execute a prompt or resume a canonical session through the kernel protocol.
     \\  health   Report local runtime readiness through the kernel protocol.
-    \\  serve    Start the HTTP bridge for /rpc, /events, and compatibility routes.
+    \\  serve    Start the HTTP bridge for /rpc, /events, and /api/health.
     \\  tools    Print the built-in tool catalog and schemas through the kernel protocol.
     \\  help     Print help for a command.
     \\
     \\Examples:
     \\  VAR1 run --prompt "Summarize src/cli.zig."
     \\  VAR1 run --prompt-file .\prompt.txt --json
-    \\  VAR1 run --session-id task-1776778021956-42e781c4c8b4efb8
+    \\  VAR1 run --session-id session-1776778021956-42e781c4c8b4efb8
     \\  VAR1 health
     \\  VAR1 serve --host 127.0.0.1 --port 4310
     \\  VAR1 tools --json
@@ -126,7 +126,7 @@ pub const run_help_text =
     \\Examples:
     \\  VAR1 run --prompt "List the files under src."
     \\  VAR1 run --prompt-file .\delegated-prompt.txt --json
-    \\  VAR1 run --session-id task-1776778021956-42e781c4c8b4efb8
+    \\  VAR1 run --session-id session-1776778021956-42e781c4c8b4efb8
     \\
 ;
 
@@ -160,13 +160,6 @@ pub const serve_help_text =
     \\  POST /rpc                 JSON-RPC bridge to the hidden kernel stdio host
     \\  GET  /events              Server-sent events for session notifications
     \\  GET  /api/health          Thin readiness alias for scripts and operators
-    \\  GET  /api/tasks           One-wave compatibility session list facade
-    \\  POST /api/tasks           One-wave compatibility create-and-run facade
-    \\  GET  /api/tasks/:id       One-wave compatibility session detail facade
-    \\  GET  /api/tasks/:id/turns One-wave compatibility message transcript facade
-    \\  GET  /api/tasks/:id/journal One-wave compatibility event history facade
-    \\  POST /api/tasks/:id/messages One-wave compatibility same-session follow-up facade
-    \\  POST /api/tasks/:id/resume One-wave compatibility resume facade
     \\
     \\Example:
     \\  VAR1 serve --host 127.0.0.1 --port 4310
@@ -197,7 +190,7 @@ pub const tools_help_text =
     \\
     \\Notes:
     \\  The default tools catalog shows the same file and agent tools exposed for ordinary coding prompts.
-    \\  Harness-domain tools remain relevance-gated and are enabled only for explicitly harness-related tasks.
+    \\  Workspace-state tools remain relevance-gated and are enabled only for explicitly .var-state-related requests.
     \\
     \\Examples:
     \\  VAR1 tools
