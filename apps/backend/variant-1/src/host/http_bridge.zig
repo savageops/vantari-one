@@ -1,4 +1,5 @@
 const std = @import("std");
+const bridge_access = @import("bridge_access.zig");
 const protocol_types = @import("../shared/protocol/types.zig");
 const provider = @import("../core/providers/openai_compatible.zig");
 const stdio_rpc = @import("stdio_rpc.zig");
@@ -8,6 +9,7 @@ const max_request_body_bytes = 256 * 1024;
 const connection_read_buffer_size = 16 * 1024;
 const connection_write_buffer_size = 16 * 1024;
 const sse_poll_timeout_ms: usize = 1000;
+pub const test_bridge_token = "test-bridge-token";
 
 pub const ServeOptions = struct {
     host: []const u8 = "127.0.0.1",
@@ -57,6 +59,8 @@ pub const KernelBridge = struct {
 pub const Bridge = struct {
     allocator: std.mem.Allocator,
     kernel: KernelBridge,
+    token_storage: [64]u8 = undefined,
+    token_len: usize = 0,
 
     pub fn initLocal(allocator: std.mem.Allocator) !Bridge {
         const client = try allocator.create(stdio_rpc.LocalClient);
@@ -73,6 +77,7 @@ pub const Bridge = struct {
                 .deinitFn = localKernelDeinit,
             },
         };
+        bridge.initRandomToken();
 
         const subscribe_call = try bridge.kernel.call(allocator, protocol_types.methods.events_subscribe, "{}");
         defer subscribe_call.deinit(allocator);
@@ -83,14 +88,37 @@ pub const Bridge = struct {
     }
 
     pub fn initWithKernel(allocator: std.mem.Allocator, kernel: KernelBridge) Bridge {
-        return .{
+        var bridge = Bridge{
             .allocator = allocator,
             .kernel = kernel,
         };
+        bridge.setToken(test_bridge_token);
+        return bridge;
     }
 
     pub fn deinit(self: *Bridge) void {
         self.kernel.deinit(self.allocator);
+    }
+
+    pub fn bridgeToken(self: *const Bridge) []const u8 {
+        return self.token_storage[0..self.token_len];
+    }
+
+    fn setToken(self: *Bridge, token: []const u8) void {
+        std.debug.assert(token.len <= self.token_storage.len);
+        @memcpy(self.token_storage[0..token.len], token);
+        self.token_len = token.len;
+    }
+
+    fn initRandomToken(self: *Bridge) void {
+        var bytes: [24]u8 = undefined;
+        std.crypto.random.bytes(&bytes);
+        const alphabet = "0123456789abcdef";
+        for (bytes, 0..) |byte, index| {
+            self.token_storage[index * 2] = alphabet[byte >> 4];
+            self.token_storage[index * 2 + 1] = alphabet[byte & 0x0f];
+        }
+        self.token_len = bytes.len * 2;
     }
 };
 
@@ -98,6 +126,7 @@ const Response = struct {
     status: std.http.Status,
     content_type: []const u8,
     body: []u8,
+    cors_origin: []const u8 = bridge_access.default_cors_origin,
 
     pub fn deinit(self: Response, allocator: std.mem.Allocator) void {
         allocator.free(self.body);
@@ -123,7 +152,7 @@ pub fn serve(allocator: std.mem.Allocator, _: types.Config, options: ServeOption
     while (true) {
         var connection = try listener.accept();
         handleConnection(allocator, &bridge, &connection) catch |err| {
-            logBridgeError("http_connection", null, err);
+            bridge_access.logError("http_connection", null, err);
         };
     }
 }
@@ -135,7 +164,19 @@ pub fn route(
     target: []const u8,
     body: []const u8,
 ) !Response {
-    return routeBridge(allocator, bridge, method, target, body);
+    return routeWithAccess(allocator, bridge, method, target, body, null, null);
+}
+
+pub fn routeWithAccess(
+    allocator: std.mem.Allocator,
+    bridge: *Bridge,
+    method: std.http.Method,
+    target: []const u8,
+    body: []const u8,
+    origin: ?[]const u8,
+    bridge_token: ?[]const u8,
+) !Response {
+    return routeBridge(allocator, bridge, method, target, body, origin, bridge_token);
 }
 
 fn handleConnection(
@@ -156,13 +197,16 @@ fn handleConnection(
     const target = try allocator.dupe(u8, request.head.target);
     defer allocator.free(target);
 
+    const origin = requestHeader(&request, "origin");
+    const bridge_token = requestHeader(&request, "x-var1-bridge-token");
+
     const body = try readRequestBody(allocator, &request);
     defer allocator.free(body);
 
-    const response = routeBridge(allocator, bridge, request.head.method, target, body) catch |err| {
+    const response = routeBridge(allocator, bridge, request.head.method, target, body, origin, bridge_token) catch |err| {
         const failure = try jsonErrorResponse(allocator, .internal_server_error, "InternalServerError");
         defer failure.deinit(allocator);
-        logBridgeError("bridge_route", null, err);
+        bridge_access.logError("bridge_route", null, err);
         try respond(&request, failure);
         return;
     };
@@ -177,15 +221,25 @@ fn routeBridge(
     method: std.http.Method,
     target: []const u8,
     body: []const u8,
+    origin: ?[]const u8,
+    bridge_token: ?[]const u8,
 ) !Response {
     const path = requestPath(target);
+    const cors_origin = bridge_access.allowedCorsOrigin(origin) orelse {
+        return jsonErrorResponseWithCors(allocator, .forbidden, "ForbiddenOrigin", bridge_access.default_cors_origin);
+    };
 
     if (method == .OPTIONS) {
         return .{
             .status = .no_content,
             .content_type = "text/plain; charset=utf-8",
             .body = try allocator.dupe(u8, ""),
+            .cors_origin = cors_origin,
         };
+    }
+
+    if (bridge_access.isTokenRequired(method, path) and !bridge_access.tokenValid(bridge.bridgeToken(), bridge_token)) {
+        return jsonErrorResponseWithCors(allocator, .unauthorized, "BridgeTokenRequired", cors_origin);
     }
 
     if (method == .GET and std.mem.eql(u8, path, "/")) {
@@ -193,24 +247,31 @@ fn routeBridge(
             .status = .ok,
             .content_type = "text/plain; charset=utf-8",
             .body = try allocator.dupe(u8, "VAR1 HTTP bridge ready. Use POST /rpc, GET /events, or the external client in apps/frontend/var1-client.\n"),
+            .cors_origin = cors_origin,
         };
     }
 
     if (method == .POST and std.mem.eql(u8, path, "/rpc")) {
-        return forwardRpcRequest(allocator, bridge, body);
+        var response = try forwardRpcRequest(allocator, bridge, body);
+        response.cors_origin = cors_origin;
+        return response;
     }
 
     if (method == .GET and std.mem.eql(u8, path, "/events")) {
-        return renderEventSnapshotResponse(allocator, bridge, target);
+        var response = try renderEventSnapshotResponse(allocator, bridge, target);
+        response.cors_origin = cors_origin;
+        return response;
     }
 
     if (method == .GET and std.mem.eql(u8, path, "/api/health")) {
         const result_json = try callKernelResult(allocator, bridge, protocol_types.methods.health_get, "{}");
         defer allocator.free(result_json);
-        return jsonResponse(allocator, .ok, result_json);
+        const health_json = try bridge_access.redactAndAttachHandshake(allocator, result_json, bridge.bridgeToken());
+        defer allocator.free(health_json);
+        return jsonResponseWithCors(allocator, .ok, health_json, cors_origin);
     }
 
-    return jsonErrorResponse(allocator, .not_found, "NotFound");
+    return jsonErrorResponseWithCors(allocator, .not_found, "NotFound", cors_origin);
 }
 
 fn forwardRpcRequest(allocator: std.mem.Allocator, bridge: *Bridge, body: []const u8) !Response {
@@ -241,6 +302,10 @@ fn forwardRpcRequest(allocator: std.mem.Allocator, bridge: *Bridge, body: []cons
     else
         try allocator.dupe(u8, "{}");
     defer allocator.free(params_json);
+
+    const audit_session_id = try bridge_access.extractSessionId(allocator, params_json);
+    defer if (audit_session_id) |value| allocator.free(value);
+    bridge_access.logAudit(method_value.string, audit_session_id);
 
     const call = try bridge.kernel.call(allocator, method_value.string, params_json);
     defer call.deinit(allocator);
@@ -298,8 +363,8 @@ fn respond(request: *std.http.Server.Request, response: Response) !void {
     const headers = [_]std.http.Header{
         .{ .name = "content-type", .value = response.content_type },
         .{ .name = "cache-control", .value = "no-store" },
-        .{ .name = "access-control-allow-origin", .value = "*" },
-        .{ .name = "access-control-allow-headers", .value = "content-type,last-event-id" },
+        .{ .name = "access-control-allow-origin", .value = response.cors_origin },
+        .{ .name = "access-control-allow-headers", .value = "content-type,last-event-id,x-var1-bridge-token" },
         .{ .name = "access-control-allow-methods", .value = "GET,POST,OPTIONS" },
         .{ .name = "x-content-type-options", .value = "nosniff" },
     };
@@ -313,6 +378,14 @@ fn respond(request: *std.http.Server.Request, response: Response) !void {
 fn requestPath(target: []const u8) []const u8 {
     const query_index = std.mem.indexOfScalar(u8, target, '?') orelse target.len;
     return target[0..query_index];
+}
+
+fn requestHeader(request: *std.http.Server.Request, name: []const u8) ?[]const u8 {
+    var headers = request.iterateHeaders();
+    while (headers.next()) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
+    }
+    return null;
 }
 
 fn parseSinceQuery(target: []const u8) u64 {
@@ -335,10 +408,20 @@ fn renderSseEvent(allocator: std.mem.Allocator, notification: stdio_rpc.Notifica
 }
 
 fn jsonResponse(allocator: std.mem.Allocator, status: std.http.Status, payload_json: []const u8) !Response {
+    return jsonResponseWithCors(allocator, status, payload_json, bridge_access.default_cors_origin);
+}
+
+fn jsonResponseWithCors(
+    allocator: std.mem.Allocator,
+    status: std.http.Status,
+    payload_json: []const u8,
+    cors_origin: []const u8,
+) !Response {
     return .{
         .status = status,
         .content_type = "application/json; charset=utf-8",
         .body = try allocator.dupe(u8, payload_json),
+        .cors_origin = cors_origin,
     };
 }
 
@@ -361,6 +444,17 @@ fn jsonErrorResponse(
     });
 }
 
+fn jsonErrorResponseWithCors(
+    allocator: std.mem.Allocator,
+    status: std.http.Status,
+    error_code: []const u8,
+    cors_origin: []const u8,
+) !Response {
+    var response = try jsonErrorResponse(allocator, status, error_code);
+    response.cors_origin = cors_origin;
+    return response;
+}
+
 fn callKernelResult(
     allocator: std.mem.Allocator,
     bridge: *Bridge,
@@ -380,22 +474,6 @@ fn expectKernelResult(allocator: std.mem.Allocator, call: stdio_rpc.RpcCallResul
 fn renderJsonAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
     return std.fmt.allocPrint(allocator, "{f}", .{
         std.json.fmt(value, .{}),
-    });
-}
-
-fn logBridgeError(scope: []const u8, session_id: ?[]const u8, err: anyerror) void {
-    if (session_id) |value| {
-        std.debug.print("VAR1 bridge error scope={s} session_id={s} error={s}\n", .{
-            scope,
-            value,
-            @errorName(err),
-        });
-        return;
-    }
-
-    std.debug.print("VAR1 bridge error scope={s} error={s}\n", .{
-        scope,
-        @errorName(err),
     });
 }
 

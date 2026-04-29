@@ -24,6 +24,35 @@ fn execCtx(workspace_root: []const u8) VAR1.core.tool_runtime.ExecutionContext {
     };
 }
 
+fn execCtxWithProbe(
+    workspace_root: []const u8,
+    probe_fn: *const fn (?*anyopaque, std.mem.Allocator, []const u8) anyerror!bool,
+) VAR1.core.tool_runtime.ExecutionContext {
+    return .{
+        .workspace_root = workspace_root,
+        .command_probe = .{
+            .context = null,
+            .commandExistsFn = probe_fn,
+        },
+    };
+}
+
+fn mockCommandAvailable(
+    _: ?*anyopaque,
+    _: std.mem.Allocator,
+    command_name: []const u8,
+) anyerror!bool {
+    return std.mem.eql(u8, command_name, "iex");
+}
+
+fn mockCommandUnavailable(
+    _: ?*anyopaque,
+    _: std.mem.Allocator,
+    _: []const u8,
+) anyerror!bool {
+    return false;
+}
+
 const MockCommandContext = struct {
     allocator: std.mem.Allocator,
     last_command: ?[]u8 = null,
@@ -317,7 +346,7 @@ test "search_files uses the command runner contract" {
 
     var search_call = try makeToolCall(std.testing.allocator, "search_files", "{\"pattern\":\"read_file\",\"path\":\"src\",\"max_results\":5}");
     defer search_call.deinit(std.testing.allocator);
-    const search_output = try VAR1.core.tool_runtime.executeWithRunner(std.testing.allocator, execCtx(workspace_root), search_call, .{
+    const search_output = try VAR1.core.tool_runtime.executeWithRunner(std.testing.allocator, execCtxWithProbe(workspace_root, mockCommandAvailable), search_call, .{
         .context = &context,
         .runFn = mockCommandRunner,
     });
@@ -592,7 +621,59 @@ test "catalog json exposes schema and example objects for default coding tools" 
     try std.testing.expect(std.mem.indexOf(u8, catalog, "\"type\": \"object\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, catalog, "\"contract_example\":{\"path\":\"src/core/tools/runtime.zig\",\"start_line\":1,\"end_line\":80}") != null);
     try std.testing.expect(std.mem.indexOf(u8, catalog, "\"usage_hint\":\"Pass a file path, not a directory.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, catalog, "\"availability\":{\"status\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, catalog, "\"name\":\"todo_slice\"") == null);
+}
+
+test "catalog json reports unavailable command-backed tools explicitly" {
+    const catalog = try VAR1.core.tool_runtime.renderCatalogJson(std.testing.allocator, execCtxWithProbe(".", mockCommandUnavailable));
+    defer std.testing.allocator.free(catalog);
+
+    try std.testing.expect(std.mem.indexOf(u8, catalog, "\"name\":\"search_files\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, catalog, "\"availability\":{\"status\":\"unavailable\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, catalog, "\"kind\":\"external_command\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, catalog, "\"name\":\"iex\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, catalog, "\"available\":false") != null);
+}
+
+test "availability registry uses builtin module-owned names" {
+    const search_spec = VAR1.core.tools.registry.availabilitySpec("search_files");
+    try std.testing.expect(search_spec.dependency != null);
+    try std.testing.expectEqual(VAR1.core.tools.module.DependencyKind.external_command, search_spec.dependency.?.kind);
+    try std.testing.expectEqualStrings("iex", search_spec.dependency.?.name);
+
+    const agent_spec = VAR1.core.tools.registry.availabilitySpec("launch_agent");
+    try std.testing.expect(agent_spec.dependency == null);
+}
+
+test "catalog json reports available command-backed tools when dependency resolves" {
+    const catalog = try VAR1.core.tool_runtime.renderCatalogJson(std.testing.allocator, execCtxWithProbe(".", mockCommandAvailable));
+    defer std.testing.allocator.free(catalog);
+
+    try std.testing.expect(std.mem.indexOf(u8, catalog, "\"name\":\"search_files\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, catalog, "\"availability\":{\"status\":\"available\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, catalog, "\"name\":\"iex\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, catalog, "\"available\":true") != null);
+}
+
+test "search_files stops before execution when iex is unavailable" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
+    defer std.testing.allocator.free(workspace_root);
+
+    var context = MockCommandContext{ .allocator = std.testing.allocator };
+    defer context.deinit();
+
+    var search_call = try makeToolCall(std.testing.allocator, "search_files", "{\"pattern\":\"read_file\",\"path\":\".\",\"max_results\":5}");
+    defer search_call.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.ToolUnavailable, VAR1.core.tool_runtime.executeWithRunner(std.testing.allocator, execCtxWithProbe(workspace_root, mockCommandUnavailable), search_call, .{
+        .context = &context,
+        .runFn = mockCommandRunner,
+    }));
+    try std.testing.expect(context.last_command == null);
 }
 
 test "agent system prompt teaches schema repair and file-tool roles" {

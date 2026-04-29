@@ -87,6 +87,43 @@ test "config loader rejects missing required keys" {
     try std.testing.expectError(VAR1.core.config.Error.MissingKey, VAR1.core.config.loadFromEnvFile(std.testing.allocator, env_path));
 }
 
+test "local settings TOML overlays non-secret context policy" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
+    defer std.testing.allocator.free(workspace_root);
+
+    const settings_path = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ workspace_root, ".var", "config", "settings.toml" });
+    defer std.testing.allocator.free(settings_path);
+
+    try VAR1.shared.fsutil.writeText(settings_path,
+        \\[context]
+        \\auto_compaction = false
+        \\manual_compaction = true
+        \\context_window_tokens = 128000
+        \\compact_at_ratio = 0.75
+        \\reserve_output_tokens = 4096
+        \\keep_recent_messages = 6
+        \\max_entries_per_checkpoint = 3
+        \\aggressiveness_milli = 500
+        \\retry_on_provider_overflow = false
+        \\
+    );
+
+    const policy = try VAR1.core.config.local_settings.loadContextPolicy(std.testing.allocator, workspace_root, .{});
+
+    try std.testing.expect(!policy.auto_compaction);
+    try std.testing.expect(policy.manual_compaction);
+    try std.testing.expectEqual(@as(u64, 128_000), policy.context_window_tokens);
+    try std.testing.expectEqual(@as(u16, 750), policy.compact_at_ratio_milli);
+    try std.testing.expectEqual(@as(u64, 4_096), policy.reserve_output_tokens);
+    try std.testing.expectEqual(@as(usize, 6), policy.keep_recent_messages);
+    try std.testing.expectEqual(@as(usize, 3), policy.max_entries_per_checkpoint);
+    try std.testing.expectEqual(@as(u16, 500), policy.aggressiveness_milli);
+    try std.testing.expect(!policy.retry_on_provider_overflow);
+}
+
 test "config loader ignores commented backup provider entries" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -522,6 +559,21 @@ test "context builder emits latest summary plus recent raw transcript" {
     try std.testing.expect(std.mem.indexOf(u8, provider_messages.items[0].content.?, "Initial prompt\n") == null);
     try std.testing.expectEqualStrings("Follow-up prompt", provider_messages.items[1].content.?);
     try std.testing.expectEqualStrings("Follow-up answer", provider_messages.items[2].content.?);
+}
+
+test "context budget and overflow primitives expose explicit capability boundaries" {
+    const policy = VAR1.shared.types.ContextPolicy{
+        .auto_compaction = true,
+        .context_window_tokens = 1000,
+        .compact_at_ratio_milli = 900,
+        .reserve_output_tokens = 250,
+    };
+
+    try std.testing.expectEqual(@as(u64, 750), VAR1.core.context.budget.thresholdTokens(policy));
+    try std.testing.expect(!VAR1.core.context.budget.shouldCompact(749, policy));
+    try std.testing.expect(VAR1.core.context.budget.shouldCompact(750, policy));
+    try std.testing.expect(VAR1.core.context.overflow.isContextOverflowText("maximum context length exceeded"));
+    try std.testing.expect(!VAR1.core.context.overflow.isContextOverflowText("Too many requests: rate limit exceeded."));
 }
 
 test "context compactor appends a structured checkpoint from stable sequence ranges" {

@@ -200,6 +200,7 @@ fn mockKernelCall(
                 .model = "gemma-4-26b-a4b-it-apex",
                 .workspace_root = "E:/tmp/workspace",
                 .base_url = "http://127.0.0.1:1234",
+                .api_key = "sk-secret",
             }),
         };
     }
@@ -374,12 +375,14 @@ test "web route forwards json-rpc payloads and preserves caller ids" {
     defer ctx.deinit();
     var bridge = makeBridge(std.testing.allocator, &ctx);
 
-    const response = try VAR1.host.http_bridge.route(
+    const response = try VAR1.host.http_bridge.routeWithAccess(
         std.testing.allocator,
         &bridge,
         .POST,
         "/rpc",
         "{\"jsonrpc\":\"2.0\",\"id\":\"req-1\",\"method\":\"health/get\",\"params\":{\"probe\":true}}",
+        "http://127.0.0.1:4310",
+        VAR1.host.http_bridge.test_bridge_token,
     );
     defer response.deinit(std.testing.allocator);
 
@@ -400,12 +403,14 @@ test "web route renders session notifications as sse snapshots" {
     );
     var bridge = makeBridge(std.testing.allocator, &ctx);
 
-    const response = try VAR1.host.http_bridge.route(
+    const response = try VAR1.host.http_bridge.routeWithAccess(
         std.testing.allocator,
         &bridge,
         .GET,
         "/events?since=0",
         "",
+        "http://127.0.0.1:4310",
+        VAR1.host.http_bridge.test_bridge_token,
     );
     defer response.deinit(std.testing.allocator);
 
@@ -414,6 +419,83 @@ test "web route renders session notifications as sse snapshots" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "id: 4") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "event: session/event") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"session_id\":\"session-1\"") != null);
+}
+
+test "web route rejects unapproved browser origins" {
+    var ctx = MockKernelContext.init(std.testing.allocator);
+    defer ctx.deinit();
+    var bridge = makeBridge(std.testing.allocator, &ctx);
+
+    const response = try VAR1.host.http_bridge.routeWithAccess(
+        std.testing.allocator,
+        &bridge,
+        .GET,
+        "/api/health",
+        "",
+        "https://example.com",
+        null,
+    );
+    defer response.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(std.http.Status.forbidden, response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"error\":\"ForbiddenOrigin\"") != null);
+    try std.testing.expect(!std.mem.eql(u8, response.cors_origin, "*"));
+}
+
+test "web route denies null origin and allows explicit local origins" {
+    var ctx = MockKernelContext.init(std.testing.allocator);
+    defer ctx.deinit();
+    var bridge = makeBridge(std.testing.allocator, &ctx);
+
+    const null_origin_response = try VAR1.host.http_bridge.routeWithAccess(
+        std.testing.allocator,
+        &bridge,
+        .GET,
+        "/api/health",
+        "",
+        "null",
+        null,
+    );
+    defer null_origin_response.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(std.http.Status.forbidden, null_origin_response.status);
+    try std.testing.expect(std.mem.indexOf(u8, null_origin_response.body, "\"error\":\"ForbiddenOrigin\"") != null);
+
+    const local_response = try VAR1.host.http_bridge.routeWithAccess(
+        std.testing.allocator,
+        &bridge,
+        .GET,
+        "/api/health",
+        "",
+        "http://127.0.0.1:5173",
+        null,
+    );
+    defer local_response.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(std.http.Status.ok, local_response.status);
+    try std.testing.expectEqualStrings("http://127.0.0.1:5173", local_response.cors_origin);
+    try std.testing.expect(std.mem.indexOf(u8, local_response.body, "\"bridge_token\":\"test-bridge-token\"") != null);
+}
+
+test "web route requires bridge token for rpc and event access" {
+    var ctx = MockKernelContext.init(std.testing.allocator);
+    defer ctx.deinit();
+    var bridge = makeBridge(std.testing.allocator, &ctx);
+
+    const response = try VAR1.host.http_bridge.routeWithAccess(
+        std.testing.allocator,
+        &bridge,
+        .POST,
+        "/rpc",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"req-1\",\"method\":\"health/get\",\"params\":{}}",
+        "http://localhost:5173",
+        null,
+    );
+    defer response.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(std.http.Status.unauthorized, response.status);
+    try std.testing.expectEqualStrings("http://localhost:5173", response.cors_origin);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"error\":\"BridgeTokenRequired\"") != null);
 }
 
 test "web route rejects removed api facade" {
@@ -430,6 +512,9 @@ test "web route rejects removed api facade" {
     );
     defer health_response.deinit(std.testing.allocator);
     try std.testing.expect(std.mem.indexOf(u8, health_response.body, "\"model\":\"gemma-4-26b-a4b-it-apex\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, health_response.body, "\"bridge_token\":\"test-bridge-token\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, health_response.body, "sk-secret") == null);
+    try std.testing.expect(std.mem.indexOf(u8, health_response.body, "\"api_key\":\"[redacted]\"") != null);
 
     const root_response = try VAR1.host.http_bridge.route(
         std.testing.allocator,
@@ -452,4 +537,36 @@ test "web route rejects removed api facade" {
     defer nested_response.deinit(std.testing.allocator);
     try std.testing.expectEqual(std.http.Status.not_found, nested_response.status);
     try std.testing.expect(std.mem.indexOf(u8, nested_response.body, "\"error\":\"NotFound\"") != null);
+}
+
+test "bridge access module owns origin redaction and audit classification" {
+    try std.testing.expectEqualStrings(
+        VAR1.host.bridge_access.default_cors_origin,
+        VAR1.host.bridge_access.allowedCorsOrigin(null).?,
+    );
+    try std.testing.expectEqualStrings(
+        "http://[::1]:5173",
+        VAR1.host.bridge_access.allowedCorsOrigin("http://[::1]:5173").?,
+    );
+    try std.testing.expect(VAR1.host.bridge_access.allowedCorsOrigin("null") == null);
+    try std.testing.expect(VAR1.host.bridge_access.allowedCorsOrigin("https://example.com") == null);
+    try std.testing.expect(VAR1.host.bridge_access.tokenValid("token-1", "token-1"));
+    try std.testing.expect(!VAR1.host.bridge_access.tokenValid("token-1", "token-2"));
+    try std.testing.expectEqualStrings(
+        "session_write",
+        VAR1.host.bridge_access.auditAction(VAR1.shared.protocol.types.methods.session_send).?,
+    );
+
+    const payload = try VAR1.host.bridge_access.redactAndAttachHandshake(
+        std.testing.allocator,
+        "{\"ok\":true,\"api_key\":\"sk-secret\",\"nested\":{\"authorization\":\"Bearer abc\",\"safe\":\"value\"}}",
+        "token-1",
+    );
+    defer std.testing.allocator.free(payload);
+
+    try std.testing.expect(std.mem.indexOf(u8, payload, "sk-secret") == null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "Bearer abc") == null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"api_key\":\"[redacted]\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"authorization\":\"[redacted]\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"bridge_token\":\"token-1\"") != null);
 }

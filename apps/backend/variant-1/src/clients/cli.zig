@@ -183,7 +183,11 @@ pub const tools_help_text =
     \\        "description": "...",
     \\        "parameters_schema": { ... },
     \\        "contract_example": { ... },
-    \\        "usage_hint": "..."
+    \\        "usage_hint": "...",
+    \\        "availability": {
+    \\          "status": "available|unavailable",
+    \\          "dependencies": [{ "kind": "external_command", "name": "iex", "available": true }]
+    \\        }
     \\      }
     \\    ]
     \\  }

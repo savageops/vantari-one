@@ -1,10 +1,12 @@
 const std = @import("std");
+const context_overflow = @import("../context/overflow.zig");
 const types = @import("../../shared/types.zig");
 
 // TODO: Keep transport details isolated here so the loop stays provider-agnostic.
 
 pub const Error = error{
     BadStatus,
+    ContextWindowExceeded,
     MissingChoice,
     MissingContent,
 };
@@ -321,7 +323,12 @@ fn parseRawHttpResponse(allocator: std.mem.Allocator, raw_response: []const u8) 
     _ = status_iter.next() orelse return error.InvalidHttpResponse;
     const status_code_text = status_iter.next() orelse return error.InvalidHttpResponse;
     const status_code = try std.fmt.parseUnsigned(u16, status_code_text, 10);
-    if (status_code != 200) return Error.BadStatus;
+    if (status_code != 200) {
+        if (status_code == 413 or context_overflow.isContextOverflowText(headers) or context_overflow.isContextOverflowText(body)) {
+            return Error.ContextWindowExceeded;
+        }
+        return Error.BadStatus;
+    }
 
     var is_chunked = false;
     var content_length: ?usize = null;

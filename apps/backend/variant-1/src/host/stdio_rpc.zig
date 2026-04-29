@@ -11,6 +11,7 @@ pub const Error = error{
     InvalidRequest,
     InvalidParams,
     MethodNotFound,
+    ManualCompactionDisabled,
     SessionNotFound,
     SessionRunning,
     ExecutionFailed,
@@ -479,6 +480,7 @@ fn processRequest(server: *Server, request_payload: []const u8) !?[]u8 {
     const result_payload = dispatch(server, method_value.string, object.get("params")) catch |err| switch (err) {
         Error.MethodNotFound => return errorResponseOrNull(server.allocator, id, -32601, "Method not found"),
         Error.InvalidParams => return errorResponseOrNull(server.allocator, id, -32602, "Invalid params"),
+        Error.ManualCompactionDisabled => return errorResponseOrNull(server.allocator, id, -32003, "Manual compaction disabled"),
         Error.SessionNotFound => return errorResponseOrNull(server.allocator, id, -32001, "Session not found"),
         Error.SessionRunning => return errorResponseOrNull(server.allocator, id, -32002, "Session already running"),
         Error.ExecutionFailed => return errorResponseOrNull(server.allocator, id, -32000, "Execution failed"),
@@ -679,6 +681,8 @@ fn handleSessionSend(server: *Server, params: ?std.json.Value) ![]u8 {
 }
 
 fn handleSessionCompact(server: *Server, params: ?std.json.Value) ![]u8 {
+    if (!server.config.context_policy.manual_compaction) return Error.ManualCompactionDisabled;
+
     const Args = struct {
         session_id: []const u8,
         keep_recent_messages: ?u32 = null,
@@ -699,9 +703,9 @@ fn handleSessionCompact(server: *Server, params: ?std.json.Value) ![]u8 {
     if (server.runtime.isRunning(session.id)) return Error.SessionRunning;
 
     const trigger = parsed.value.trigger orelse "manual";
-    const keep_recent_messages = @as(usize, parsed.value.keep_recent_messages orelse 4);
-    const max_entries_per_checkpoint = @as(usize, parsed.value.max_entries_per_checkpoint orelse 0);
-    const aggressiveness_milli = try compactAggressivenessMilli(parsed.value.aggressiveness);
+    const keep_recent_messages = @as(usize, parsed.value.keep_recent_messages orelse @intCast(server.config.context_policy.keep_recent_messages));
+    const max_entries_per_checkpoint = @as(usize, parsed.value.max_entries_per_checkpoint orelse @intCast(server.config.context_policy.max_entries_per_checkpoint));
+    const aggressiveness_milli = try compactAggressivenessMilli(parsed.value.aggressiveness, server.config.context_policy.aggressiveness_milli);
     const compact_result = context_compactor.compactSession(server.allocator, server.config.workspace_root, session.id, .{
         .keep_recent_messages = keep_recent_messages,
         .max_entries_per_checkpoint = max_entries_per_checkpoint,
@@ -721,8 +725,8 @@ fn handleSessionCompact(server: *Server, params: ?std.json.Value) ![]u8 {
     });
 }
 
-fn compactAggressivenessMilli(value: ?f64) !u16 {
-    const provided = value orelse return 350;
+fn compactAggressivenessMilli(value: ?f64, default_milli: u16) !u16 {
+    const provided = value orelse return default_milli;
     if (!std.math.isFinite(provided) or provided < 0.0 or provided > 1.0) return Error.InvalidParams;
     return @intFromFloat(provided * 1000.0 + 0.5);
 }

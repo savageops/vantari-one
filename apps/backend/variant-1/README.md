@@ -15,13 +15,13 @@ This app is the only live backend lane in the repository. Operators use the CLI,
 | Protocol | JSON-RPC 2.0 over stdio with Content-Length framing |
 | State root | `.var/sessions/<id>/` |
 | Provider boundary | `src/core/providers/openai_compatible.zig` |
-| Tool runtime | `src/core/tools/runtime.zig` |
+| Tool runtime | `src/core/tools/runtime.zig`, `src/core/tools/registry.zig`, `src/core/tools/builtin/*.zig` |
 
 ## What ships
 
 - `VAR1 run` for direct prompt execution.
 - `VAR1 health` for provider and runtime readiness.
-- `VAR1 tools` for the built-in schema catalog.
+- `VAR1 tools` for the built-in schema and availability catalog.
 - `VAR1 serve` for the browser-facing bridge:
   - `POST /rpc`
   - `GET /events`
@@ -51,24 +51,24 @@ Runtime code is physically partitioned by ownership under `src/`:
 | --- | --- | --- | --- |
 | `shared` | `VAR1.shared` | `shared/types.zig`, `shared/fsutil.zig`, `shared/protocol/` | contracts, filesystem helpers, wire payloads |
 | `core` | `VAR1.core` | `core/config/`, `core/sessions/`, `core/executor/`, `core/providers/`, `core/tools/`, `core/agents/`, `core/auth/` | execution, state, provider transport, tools, delegation, auth resolution |
-| `host` | `VAR1.host` | `host/stdio_rpc.zig`, `host/http_bridge.zig` | stdio RPC host and HTTP bridge |
+| `host` | `VAR1.host` | `host/stdio_rpc.zig`, `host/http_bridge.zig`, `host/bridge_access.zig` | stdio RPC host, HTTP bridge, and local browser access policy |
 | `clients` | `VAR1.clients` | `clients/cli.zig` | protocol-backed client shell |
 
 The browser client lives outside the kernel at `apps/frontend/var1-client`.
 
 ## Tool runtime
 
-The current tool surface is compiled into the `VAR1` binary. Tool definitions use the shared `ToolDefinition` shape: name, description, `parameters_json`, optional example, and optional usage hint. `src/core/tools/runtime.zig` owns the built-in registry and execution dispatch; `src/core/executor/loop.zig` injects the context-filtered definitions into provider requests; `src/core/providers/openai_compatible.zig` writes them as OpenAI-compatible function schemas.
+The current tool surface is compiled into the `VAR1` binary. Tool definitions use the shared `ToolDefinition` shape: name, description, `parameters_json`, optional example, and optional usage hint. Built-in file and agent tools live under `src/core/tools/builtin/`; each module exports `definition`, `availability`, and `execute`. `src/core/tools/runtime.zig` composes those modules for catalog rendering and dispatch, `src/core/tools/registry.zig` resolves availability from module-owned tool names/specs, and `src/core/tools/module.zig` owns shared execution contracts. `src/core/executor/loop.zig` injects the context-filtered definitions into provider requests; `src/core/providers/openai_compatible.zig` writes them as OpenAI-compatible function schemas.
 
-`VAR1 tools --json` and the JSON-RPC `tools/list` method expose the same catalog. That catalog is the contract an installing client should inspect before assuming a tool exists.
+`VAR1 tools --json` and the JSON-RPC `tools/list` method expose the same catalog. That catalog includes availability metadata, so installing clients can distinguish shipped schema from currently usable capability.
 
 File tools are split by role:
 
 - `list_files` is native Zig workspace discovery.
-- `search_files` is content search and invokes the external `iex` executable as `iex search --json`.
+- `search_files` is content search, declares an `external_command("iex")` dependency, and invokes the executable as `iex search --json`.
 - `read_file`, `write_file`, `append_file`, and `replace_in_file` operate on exact workspace-relative paths.
 
-An installed runtime must provide a real `iex` executable for `search_files`. PowerShell aliases are not enough for the Zig child-process runner. If `iex` is absent, search is unavailable at the command dependency boundary; it should not be represented as a native bundled capability.
+An installed runtime must provide a real `iex` executable for `search_files`. PowerShell aliases are not enough for the Zig child-process runner. If `iex` is absent, search is unavailable at the command dependency boundary, `VAR1 tools --json` reports that state, and execution fails early with `ToolUnavailable` instead of surfacing a late child-process surprise.
 
 `src/core/tools/sockets.zig` and `src/core/plugins/manifest.zig` are validation boundaries for typed sockets and plugin manifests. They do not load plugins, auto-discover plugin roots, or mutate the model-visible tool list.
 
@@ -103,11 +103,16 @@ Build, test, check provider readiness, then run one prompt:
    .\zig-out\bin\VAR1.exe serve --host 127.0.0.1 --port 4310
    ```
 
-2. Open `apps/frontend/var1-client/index.html`.
+2. Serve the static browser client from an explicit local HTTP origin.
 
-3. Point the client at `http://127.0.0.1:4310`.
+   ```powershell
+   cd ..\..\frontend\var1-client
+   python -m http.server 5173 --bind 127.0.0.1
+   ```
 
-The browser client uses only `POST /rpc`, `GET /events`, and `GET /api/health`.
+3. Open `http://127.0.0.1:5173` and point the client at `http://127.0.0.1:4310`.
+
+The browser client uses only `POST /rpc`, `GET /events`, and `GET /api/health`. Startup reads `/api/health` first, stores the returned `bridge_token`, and sends it as `X-VAR1-Bridge-Token` for `/rpc` and `/events`.
 
 ## Session flow
 
@@ -144,10 +149,10 @@ The browser client uses only `POST /rpc`, `GET /events`, and `GET /api/health`.
 
 - `/rpc` forwards JSON-RPC requests to the hidden stdio kernel host
 - `/events` returns SSE-compatible event snapshots for session notifications
-- `/api/health` is a thin readiness alias for scripts
+- `/api/health` is the local readiness and bridge-token handshake route
 - `/` is bridge-only text that points operators at `apps/frontend/var1-client`
 
-No kernel-owned HTML is served from `src/`.
+The bridge binds to `127.0.0.1` by default. `host/bridge_access.zig` owns the local-origin allowlist, token guard, bridge-visible redaction, and audit-action classification; `host/http_bridge.zig` owns the route and connection transport. No kernel-owned HTML is served from `src/`.
 
 ## Scripts
 
@@ -187,7 +192,22 @@ Required `.env` keys:
 - `MAX_STEPS`
 - `WORKSPACE`
 
-Use `.env.example` as the public template. Keep live `.env` values local.
+Use `.env.example` as the public template. Keep live `.env` values local. Non-secret context policy lives in `.var/config/settings.toml` when an override is needed:
+
+```toml
+[context]
+auto_compaction = true
+manual_compaction = true
+context_window_tokens = 128000
+compact_at_ratio = 0.85
+reserve_output_tokens = 8192
+keep_recent_messages = 8
+max_entries_per_checkpoint = 0
+aggressiveness_milli = 350
+retry_on_provider_overflow = true
+```
+
+The context policy controls only model-window behavior. `messages.jsonl` stays append-only, `context.jsonl` stays the checkpoint ledger, manual `session/compact` remains available when `manual_compaction = true`, and executor auto-compaction calls the same compactor when estimates or provider overflow require a smaller model-visible window.
 
 ## Files worth reading first
 
@@ -195,10 +215,16 @@ Use `.env.example` as the public template. Keep live `.env` values local.
 - `src/clients/cli.zig`
 - `src/host/stdio_rpc.zig`
 - `src/host/http_bridge.zig`
+- `src/host/bridge_access.zig`
 - `src/core/executor/loop.zig`
 - `src/core/context/builder.zig`
 - `src/core/context/compactor.zig`
+- `src/core/context/budget.zig`
+- `src/core/context/overflow.zig`
 - `src/core/sessions/store.zig`
+- `src/core/tools/module.zig`
+- `src/core/tools/registry.zig`
+- `src/core/tools/builtin/`
 - `tests/`
 - `../frontend/var1-client/`
 
@@ -209,17 +235,19 @@ This lane is now session-native end to end:
 - store
 - context builder
 - context compactor
+- context budget and overflow policy
 - executor
+- tool module registry and availability catalog
 - protocol types
 - stdio host
-- bridge
+- local bridge origin/token/redaction/audit guards
 - CLI
 - smoke scripts
 - tests
 
 No compatibility facade or old-layout storage reader remains in this lane.
 
-Latest local Windows validation on 2026-04-28:
+Latest local Windows validation on 2026-04-29:
 
-- `.\scripts\zigw.ps1 build test --summary all` -> `67/67 tests passed`
-- `.\scripts\health.ps1` -> `status: ready`
+- `.\scripts\zigw.ps1 build test --summary all` -> `80/80 tests passed`
+- `.\zig-out\bin\VAR1.exe tools --json` -> `search_files` includes `external_command` dependency availability for `iex`

@@ -8,6 +8,7 @@ const types = @import("../../shared/types.zig");
 
 pub const Error = error{
     Cancelled,
+    ContextWindowExceeded,
     MissingAssistantContent,
     StepLimitExceeded,
 };
@@ -137,11 +138,14 @@ pub fn runPromptWithOptions(
         execution_context.workspace_state_enabled = true;
     }
 
-    const system_prompt = try tools.buildAgentSystemPrompt(allocator, execution_context);
-    defer allocator.free(system_prompt);
-
-    try messages.append(try types.initTextMessage(allocator, .system, system_prompt));
-    context_builder.appendProviderMessages(allocator, config.workspace_root, &messages, session) catch |err| {
+    var base_message_count = rebuildProviderBaseMessages(
+        allocator,
+        config.workspace_root,
+        execution_context,
+        session,
+        &messages,
+        0,
+    ) catch |err| {
         try failSession(allocator, config.workspace_root, options.hooks, &session, @errorName(err));
         return err;
     };
@@ -154,10 +158,29 @@ pub fn runPromptWithOptions(
             return Error.Cancelled;
         }
 
-        const completion = provider.completeWithTransport(allocator, config, .{
-            .messages = messages.items,
-            .tool_definitions = tools.builtinDefinitionsForContext(execution_context),
-        }, options.transport) catch |err| {
+        base_message_count = ensureContextWithinBudget(
+            allocator,
+            config,
+            options.hooks,
+            execution_context,
+            session,
+            &messages,
+            base_message_count,
+        ) catch |err| {
+            try failSession(allocator, config.workspace_root, options.hooks, &session, @errorName(err));
+            return err;
+        };
+
+        const completion = completeWithContextRecovery(
+            allocator,
+            config,
+            options.hooks,
+            execution_context,
+            session,
+            &messages,
+            &base_message_count,
+            options.transport,
+        ) catch |err| {
             try failSession(allocator, config.workspace_root, options.hooks, &session, @errorName(err));
             return err;
         };
@@ -292,6 +315,189 @@ pub fn runPromptWithOptions(
 
     try failSession(allocator, config.workspace_root, options.hooks, &session, "StepLimitExceeded");
     return Error.StepLimitExceeded;
+}
+
+fn rebuildProviderBaseMessages(
+    allocator: std.mem.Allocator,
+    workspace_root: []const u8,
+    execution_context: tools.ExecutionContext,
+    session: types.SessionRecord,
+    messages: *std.array_list.Managed(types.ChatMessage),
+    preserve_from_index: usize,
+) !usize {
+    const preserve_start = @min(preserve_from_index, messages.items.len);
+    var preserved = std.array_list.Managed(types.ChatMessage).init(allocator);
+    errdefer {
+        for (preserved.items) |message| message.deinit(allocator);
+        preserved.deinit();
+    }
+
+    for (messages.items[preserve_start..]) |message| {
+        try preserved.append(try cloneChatMessage(allocator, message));
+    }
+
+    for (messages.items) |message| message.deinit(allocator);
+    messages.clearRetainingCapacity();
+
+    const system_prompt = try tools.buildAgentSystemPrompt(allocator, execution_context);
+    defer allocator.free(system_prompt);
+
+    try messages.append(try types.initTextMessage(allocator, .system, system_prompt));
+    try context_builder.appendProviderMessages(allocator, workspace_root, messages, session);
+
+    const base_message_count = messages.items.len;
+    try messages.appendSlice(preserved.items);
+    preserved.clearRetainingCapacity();
+    preserved.deinit();
+
+    return base_message_count;
+}
+
+fn cloneChatMessage(allocator: std.mem.Allocator, message: types.ChatMessage) !types.ChatMessage {
+    var cloned = types.ChatMessage{
+        .role = message.role,
+    };
+    errdefer cloned.deinit(allocator);
+
+    cloned.content = if (message.content) |content| try allocator.dupe(u8, content) else null;
+    cloned.tool_call_id = if (message.tool_call_id) |tool_call_id| try allocator.dupe(u8, tool_call_id) else null;
+    cloned.tool_calls = try types.cloneToolCalls(allocator, message.tool_calls);
+    return cloned;
+}
+
+fn ensureContextWithinBudget(
+    allocator: std.mem.Allocator,
+    config: types.Config,
+    hooks: Hooks,
+    execution_context: tools.ExecutionContext,
+    session: types.SessionRecord,
+    messages: *std.array_list.Managed(types.ChatMessage),
+    base_message_count: usize,
+) !usize {
+    const estimate = context_builder.budget.estimateChatMessages(messages.items);
+    if (!context_builder.budget.shouldCompact(estimate, config.context_policy)) return base_message_count;
+
+    const compacted = try compactSessionForRuntime(
+        allocator,
+        config,
+        hooks,
+        session,
+        "auto_threshold",
+        estimate,
+    );
+    if (!compacted) return base_message_count;
+
+    return rebuildProviderBaseMessages(
+        allocator,
+        config.workspace_root,
+        execution_context,
+        session,
+        messages,
+        base_message_count,
+    );
+}
+
+fn completeWithContextRecovery(
+    allocator: std.mem.Allocator,
+    config: types.Config,
+    hooks: Hooks,
+    execution_context: tools.ExecutionContext,
+    session: types.SessionRecord,
+    messages: *std.array_list.Managed(types.ChatMessage),
+    base_message_count: *usize,
+    transport: provider.Transport,
+) !types.CompletionResponse {
+    return provider.completeWithTransport(allocator, config, .{
+        .messages = messages.items,
+        .tool_definitions = tools.builtinDefinitionsForContext(execution_context),
+    }, transport) catch |err| {
+        if (err != error.ContextWindowExceeded or !config.context_policy.retry_on_provider_overflow) return err;
+
+        const estimate = context_builder.budget.estimateChatMessages(messages.items);
+        const compacted = try compactSessionForRuntime(
+            allocator,
+            config,
+            hooks,
+            session,
+            "provider_overflow",
+            estimate,
+        );
+        if (!compacted) return err;
+
+        base_message_count.* = try rebuildProviderBaseMessages(
+            allocator,
+            config.workspace_root,
+            execution_context,
+            session,
+            messages,
+            base_message_count.*,
+        );
+
+        return provider.completeWithTransport(allocator, config, .{
+            .messages = messages.items,
+            .tool_definitions = tools.builtinDefinitionsForContext(execution_context),
+        }, transport);
+    };
+}
+
+fn compactSessionForRuntime(
+    allocator: std.mem.Allocator,
+    config: types.Config,
+    hooks: Hooks,
+    session: types.SessionRecord,
+    trigger: []const u8,
+    estimated_tokens: u64,
+) !bool {
+    const start_message = try std.fmt.allocPrint(
+        allocator,
+        "Context compaction started: trigger={s} estimated_tokens={d}.",
+        .{ trigger, estimated_tokens },
+    );
+    defer allocator.free(start_message);
+    try recordSessionEvent(allocator, config.workspace_root, hooks, session.id, "context_compaction_started", start_message, session.status);
+
+    const result = context_builder.compactor.compactSession(allocator, config.workspace_root, session.id, .{
+        .keep_recent_messages = config.context_policy.keep_recent_messages,
+        .trigger = trigger,
+        .aggressiveness_milli = config.context_policy.aggressiveness_milli,
+        .max_entries_per_checkpoint = config.context_policy.max_entries_per_checkpoint,
+    }) catch |err| {
+        const failure_message = try std.fmt.allocPrint(
+            allocator,
+            "Context compaction failed: trigger={s} error={s}.",
+            .{ trigger, @errorName(err) },
+        );
+        defer allocator.free(failure_message);
+        try recordSessionEvent(allocator, config.workspace_root, hooks, session.id, "context_compaction_failed", failure_message, session.status);
+        return err;
+    };
+    defer result.deinit(allocator);
+
+    if (result.checkpoint) |checkpoint| {
+        const complete_message = try std.fmt.allocPrint(
+            allocator,
+            "Context compaction completed: trigger={s} source_seq={d}..{d} first_kept_seq={d} compacted_entries={d}.",
+            .{
+                trigger,
+                checkpoint.source_seq_start,
+                checkpoint.source_seq_end,
+                checkpoint.first_kept_seq,
+                checkpoint.compacted_entry_count,
+            },
+        );
+        defer allocator.free(complete_message);
+        try recordSessionEvent(allocator, config.workspace_root, hooks, session.id, "context_compaction_completed", complete_message, session.status);
+        return true;
+    }
+
+    const skipped_message = try std.fmt.allocPrint(
+        allocator,
+        "Context compaction skipped: trigger={s} reason={s}.",
+        .{ trigger, result.reason },
+    );
+    defer allocator.free(skipped_message);
+    try recordSessionEvent(allocator, config.workspace_root, hooks, session.id, "context_compaction_skipped", skipped_message, session.status);
+    return false;
 }
 
 fn executeToolCall(

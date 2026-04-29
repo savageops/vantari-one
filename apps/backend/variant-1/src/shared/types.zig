@@ -9,6 +9,7 @@ pub const Config = struct {
     subscription_status: ?[]u8 = null,
     max_steps: usize,
     workspace_root: []u8,
+    context_policy: ContextPolicy = .{},
 
     pub fn deinit(self: Config, allocator: std.mem.Allocator) void {
         allocator.free(self.openai_base_url);
@@ -19,6 +20,18 @@ pub const Config = struct {
         if (self.subscription_status) |value| allocator.free(value);
         allocator.free(self.workspace_root);
     }
+};
+
+pub const ContextPolicy = struct {
+    auto_compaction: bool = true,
+    manual_compaction: bool = true,
+    context_window_tokens: u64 = 128_000,
+    compact_at_ratio_milli: u16 = 850,
+    reserve_output_tokens: u64 = 8_192,
+    keep_recent_messages: usize = 8,
+    max_entries_per_checkpoint: usize = 0,
+    aggressiveness_milli: u16 = 350,
+    retry_on_provider_overflow: bool = true,
 };
 
 pub const AuthType = enum {

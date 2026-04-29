@@ -1,9 +1,12 @@
 const std = @import("std");
 const auth_resolver = @import("../auth/resolver.zig");
 const fsutil = @import("../../shared/fsutil.zig");
+const settings = @import("settings.zig");
 const types = @import("../../shared/types.zig");
 
 // TODO: Replace the manual env parsing with a fuller parser only if the simple `.env` contract becomes insufficient.
+
+pub const local_settings = settings;
 
 pub const Error = error{
     MissingKey,
@@ -73,7 +76,7 @@ pub fn loadDefault(allocator: std.mem.Allocator, workspace_root: []const u8) !ty
     defer allocator.free(env_path);
 
     var config = loadFromEnvFile(allocator, env_path) catch |err| switch (err) {
-        error.FileNotFound, Error.MissingKey => return loadDefaultFromAuthOnly(allocator, workspace_root),
+        error.FileNotFound, Error.MissingKey => try loadDefaultFromAuthOnly(allocator, workspace_root),
         else => return err,
     };
 
@@ -98,17 +101,19 @@ pub fn loadDefault(allocator: std.mem.Allocator, workspace_root: []const u8) !ty
     defer resolved_auth.deinit(allocator);
 
     try applyResolvedAuth(allocator, &config, resolved_auth);
+    config.context_policy = try settings.loadContextPolicy(allocator, config.workspace_root, config.context_policy);
     return config;
 }
 
 fn loadDefaultFromAuthOnly(allocator: std.mem.Allocator, workspace_root: []const u8) !types.Config {
     const canonical_workspace_root = try canonicalizeWorkspaceRoot(allocator, workspace_root, ".");
-    errdefer allocator.free(canonical_workspace_root);
+    var root_owned = true;
+    errdefer if (root_owned) allocator.free(canonical_workspace_root);
 
     var resolved_auth = try auth_resolver.resolveProviderAuth(allocator, canonical_workspace_root, null);
     defer resolved_auth.deinit(allocator);
 
-    return .{
+    var config = types.Config{
         .openai_base_url = try allocator.dupe(u8, resolved_auth.base_url),
         .openai_api_key = try allocator.dupe(u8, resolved_auth.api_key),
         .openai_model = try allocator.dupe(u8, resolved_auth.model),
@@ -118,6 +123,11 @@ fn loadDefaultFromAuthOnly(allocator: std.mem.Allocator, workspace_root: []const
         .max_steps = 1,
         .workspace_root = canonical_workspace_root,
     };
+    root_owned = false;
+    errdefer config.deinit(allocator);
+
+    config.context_policy = try settings.loadContextPolicy(allocator, config.workspace_root, config.context_policy);
+    return config;
 }
 
 fn applyResolvedAuth(allocator: std.mem.Allocator, config: *types.Config, resolved_auth: auth_resolver.ResolvedAuth) !void {

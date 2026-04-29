@@ -7,6 +7,7 @@ const state = {
   sessions: [],
   selectedSessionId: null,
   sessionDetail: null,
+  bridgeToken: null,
   lastEventId: 0,
   rpcCounter: 0,
   eventTimer: null,
@@ -84,6 +85,7 @@ async function reconnect() {
   state.bridgeOrigin = nextOrigin;
   refs.bridgeOrigin.value = nextOrigin;
   localStorage.setItem(STORAGE_KEY, nextOrigin);
+  state.bridgeToken = null;
   state.lastEventId = 0;
   setBridgeStatus("Connecting", "idle");
   await refreshAll();
@@ -92,8 +94,8 @@ async function reconnect() {
 
 async function refreshAll() {
   try {
-    await rpc("initialize", {});
     await refreshHealth();
+    await rpc("initialize", {});
     await refreshSessions();
     setBridgeStatus("Connected", "ready");
   } catch (error) {
@@ -112,6 +114,7 @@ async function refreshHealth() {
   }
 
   const health = await response.json();
+  state.bridgeToken = health.bridge_token ?? null;
   refs.healthModel.textContent = health.model ?? "-";
   refs.healthRoot.textContent = health.workspace_root ?? "-";
 }
@@ -317,7 +320,7 @@ function scheduleEventPoll() {
   state.eventTimer = setTimeout(async () => {
     try {
       const response = await fetch(`${state.bridgeOrigin}/events?since=${state.lastEventId}`, {
-        headers: { Accept: "text/event-stream" },
+        headers: bridgeHeaders("text/event-stream"),
       });
 
       if (!response.ok) {
@@ -386,10 +389,7 @@ async function rpc(method, params) {
 
   const response = await fetch(`${state.bridgeOrigin}/rpc`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
+    headers: bridgeHeaders("application/json", true),
     body: JSON.stringify(payload),
   });
 
@@ -403,6 +403,19 @@ async function rpc(method, params) {
   }
 
   return envelope.result;
+}
+
+function bridgeHeaders(accept, jsonBody = false) {
+  const headers = {
+    Accept: accept,
+  };
+  if (jsonBody) {
+    headers["Content-Type"] = "application/json";
+  }
+  if (state.bridgeToken) {
+    headers["X-VAR1-Bridge-Token"] = state.bridgeToken;
+  }
+  return headers;
 }
 
 function setBridgeStatus(text, tone) {

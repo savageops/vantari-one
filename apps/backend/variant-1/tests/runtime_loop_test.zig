@@ -26,8 +26,7 @@ fn mockSendSuccess(
     _: []const u8,
     _: []const u8,
 ) anyerror![]u8 {
-    return allocator.dupe(
-        u8,
+    return allocator.dupe(u8,
         \\{"model":"gemma-4-e2b-it","choices":[{"message":{"content":"There are 3 'r's in the word \"strawberry\"."}}]}
     );
 }
@@ -49,8 +48,7 @@ fn mockSendLeakyOperatorReply(
     _: []const u8,
     _: []const u8,
 ) anyerror![]u8 {
-    return allocator.dupe(
-        u8,
+    return allocator.dupe(u8,
         \\{"model":"gemma-4-e2b-it","choices":[{"message":{"content":"I launched the child agents. You can check progress with agent_status or wait_agent."}}]}
     );
 }
@@ -76,6 +74,18 @@ const ResumePromptContext = struct {
     }
 };
 
+const OverflowRetryContext = struct {
+    allocator: std.mem.Allocator,
+    call_count: usize = 0,
+    payloads: [2]?[]u8 = .{ null, null },
+
+    fn deinit(self: *OverflowRetryContext) void {
+        for (self.payloads) |payload| {
+            if (payload) |value| self.allocator.free(value);
+        }
+    }
+};
+
 const CancelContext = struct {
     checks: usize = 0,
 };
@@ -83,6 +93,7 @@ const CancelContext = struct {
 const LocalHttpServer = struct {
     server: std.net.Server,
     response: []const u8,
+    status: std.http.Status = .ok,
     method: ?std.http.Method = null,
     target_buffer: [256]u8 = undefined,
     target_len: usize = 0,
@@ -141,7 +152,7 @@ const LocalHttpServer = struct {
             ctx.body_ok = std.mem.eql(u8, body_storage[0..body_len], "{\"hello\":true}");
         }
 
-        try request.respond(ctx.response, .{ .status = .ok });
+        try request.respond(ctx.response, .{ .status = ctx.status });
     }
 };
 
@@ -158,14 +169,12 @@ fn mockSendToolLoop(
     defer ctx.call_count += 1;
 
     if (ctx.call_count == 0) {
-        return allocator.dupe(
-            u8,
+        return allocator.dupe(u8,
             \\{"model":"gemma-4-e2b-it","choices":[{"message":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"context.txt\",\"start_line\":1,\"end_line\":1}"}}]}}]}
         );
     }
 
-    return allocator.dupe(
-        u8,
+    return allocator.dupe(u8,
         \\{"model":"gemma-4-e2b-it","choices":[{"message":{"content":"The first line in context.txt is hello from file."}}]}
     );
 }
@@ -181,9 +190,28 @@ fn mockSendResumePrompt(
     if (ctx.payload) |value| ctx.allocator.free(value);
     ctx.payload = try ctx.allocator.dupe(u8, payload);
 
-    return allocator.dupe(
-        u8,
+    return allocator.dupe(u8,
         \\{"model":"gemma-4-e2b-it","choices":[{"message":{"content":"3"}}]}
+    );
+}
+
+fn mockSendOverflowThenSuccess(
+    ctx_ptr: ?*anyopaque,
+    allocator: std.mem.Allocator,
+    _: []const u8,
+    _: []const u8,
+    payload: []const u8,
+) anyerror![]u8 {
+    var ctx: *OverflowRetryContext = @ptrCast(@alignCast(ctx_ptr.?));
+    if (ctx.call_count < ctx.payloads.len) {
+        ctx.payloads[ctx.call_count] = try ctx.allocator.dupe(u8, payload);
+    }
+
+    defer ctx.call_count += 1;
+    if (ctx.call_count == 0) return error.ContextWindowExceeded;
+
+    return allocator.dupe(u8,
+        \\{"model":"gemma-4-e2b-it","choices":[{"message":{"content":"Recovered after compaction."}}]}
     );
 }
 
@@ -264,6 +292,37 @@ test "provider native http transport posts JSON over a single in-process path" {
     try std.testing.expect(local_server.accept_encoding_ok);
     try std.testing.expect(local_server.content_type_ok);
     try std.testing.expect(local_server.body_ok);
+}
+
+test "provider native http transport classifies context overflow status" {
+    var address = try std.net.Address.parseIp4("127.0.0.1", 0);
+    const server = try address.listen(.{ .reuse_address = true });
+
+    var local_server = LocalHttpServer{
+        .server = server,
+        .response = "{\"error\":{\"message\":\"maximum context length exceeded\"}}",
+        .status = .payload_too_large,
+    };
+
+    const thread = try std.Thread.spawn(.{}, LocalHttpServer.serve, .{&local_server});
+    defer thread.join();
+
+    const url = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "http://127.0.0.1:{d}/v1/chat/completions",
+        .{local_server.server.listen_address.getPort()},
+    );
+    defer std.testing.allocator.free(url);
+
+    try std.testing.expectError(error.ContextWindowExceeded, VAR1.core.provider_runtime.httpSend(
+        null,
+        std.testing.allocator,
+        url,
+        "test-key",
+        "{\"hello\":true}",
+    ));
+
+    if (local_server.err) |err| return err;
 }
 
 test "loop writes runtime state and archives docs on success" {
@@ -390,6 +449,111 @@ test "loop resumes a same-session transcript from canonical messages" {
     try std.testing.expectEqual(@as(usize, 4), messages.len);
     try std.testing.expectEqual(VAR1.shared.types.SessionMessageRole.assistant, messages[3].role);
     try std.testing.expectEqualStrings("3", messages[3].content);
+}
+
+test "loop auto-compacts before provider call when policy threshold is crossed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
+    defer std.testing.allocator.free(workspace_root);
+
+    var config = try makeConfig(std.testing.allocator, workspace_root, 4);
+    defer config.deinit(std.testing.allocator);
+    config.context_policy = .{
+        .auto_compaction = true,
+        .context_window_tokens = 80,
+        .compact_at_ratio_milli = 500,
+        .reserve_output_tokens = 10,
+        .keep_recent_messages = 2,
+        .max_entries_per_checkpoint = 0,
+        .aggressiveness_milli = 350,
+    };
+
+    var session = try VAR1.core.session_store.initSession(std.testing.allocator, workspace_root, "Initial prompt with enough words to matter.");
+    defer session.deinit(std.testing.allocator);
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Initial answer with enough words to matter.", 200);
+    try VAR1.core.session_store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Second prompt with enough words to matter.", 300);
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Second answer with enough words to matter.", 400);
+    try VAR1.core.session_store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Final prompt with enough words to matter.", 500);
+
+    var context = ResumePromptContext{ .allocator = std.testing.allocator };
+    defer context.deinit();
+
+    const result = try VAR1.core.executor.runPromptWithOptions(std.testing.allocator, config, "", .{
+        .transport = .{
+            .context = &context,
+            .sendFn = mockSendResumePrompt,
+        },
+        .execution_context = .{
+            .workspace_root = config.workspace_root,
+        },
+        .session_id = session.id,
+    });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(std.mem.indexOf(u8, context.payload.?, "VAR1 context checkpoint") != null);
+    try std.testing.expect(std.mem.indexOf(u8, context.payload.?, "Final prompt with enough words") != null);
+
+    const context_path = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ workspace_root, ".var", "sessions", result.session_id, "context.jsonl" });
+    defer std.testing.allocator.free(context_path);
+    const context_jsonl = try VAR1.shared.fsutil.readTextAlloc(std.testing.allocator, context_path);
+    defer std.testing.allocator.free(context_jsonl);
+    try std.testing.expect(std.mem.indexOf(u8, context_jsonl, "auto_threshold") != null);
+}
+
+test "loop retries once after provider-declared context overflow" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const workspace_root = try tmpWorkspacePath(std.testing.allocator, &tmp);
+    defer std.testing.allocator.free(workspace_root);
+
+    var config = try makeConfig(std.testing.allocator, workspace_root, 4);
+    defer config.deinit(std.testing.allocator);
+    config.context_policy = .{
+        .auto_compaction = false,
+        .retry_on_provider_overflow = true,
+        .context_window_tokens = 80,
+        .compact_at_ratio_milli = 500,
+        .reserve_output_tokens = 10,
+        .keep_recent_messages = 2,
+        .max_entries_per_checkpoint = 0,
+        .aggressiveness_milli = 350,
+    };
+
+    var session = try VAR1.core.session_store.initSession(std.testing.allocator, workspace_root, "Initial prompt before overflow.");
+    defer session.deinit(std.testing.allocator);
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Initial answer before overflow.", 200);
+    try VAR1.core.session_store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Second prompt before overflow.", 300);
+    try VAR1.core.session_store.upsertAssistantSessionMessage(std.testing.allocator, workspace_root, session.id, "Second answer before overflow.", 400);
+    try VAR1.core.session_store.appendSessionMessage(std.testing.allocator, workspace_root, session.id, .user, "Final prompt before overflow.", 500);
+
+    var context = OverflowRetryContext{ .allocator = std.testing.allocator };
+    defer context.deinit();
+
+    const result = try VAR1.core.executor.runPromptWithOptions(std.testing.allocator, config, "", .{
+        .transport = .{
+            .context = &context,
+            .sendFn = mockSendOverflowThenSuccess,
+        },
+        .execution_context = .{
+            .workspace_root = config.workspace_root,
+        },
+        .session_id = session.id,
+    });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), context.call_count);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "Recovered") != null);
+    try std.testing.expect(std.mem.indexOf(u8, context.payloads[0].?, "VAR1 context checkpoint") == null);
+    try std.testing.expect(std.mem.indexOf(u8, context.payloads[1].?, "VAR1 context checkpoint") != null);
+
+    const context_path = try VAR1.shared.fsutil.join(std.testing.allocator, &.{ workspace_root, ".var", "sessions", result.session_id, "context.jsonl" });
+    defer std.testing.allocator.free(context_path);
+    const context_jsonl = try VAR1.shared.fsutil.readTextAlloc(std.testing.allocator, context_path);
+    defer std.testing.allocator.free(context_jsonl);
+    try std.testing.expect(std.mem.indexOf(u8, context_jsonl, "provider_overflow") != null);
 }
 
 test "loop records a failed session when provider transport fails" {
